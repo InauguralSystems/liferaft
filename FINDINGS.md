@@ -83,3 +83,26 @@ temporal/observer words (`prev`, `at`, `state_at`, `what`/`who`/`when`/
 `where`/`why`/`how`, `converged`/`stable`/`improving`/`diverging`/
 `oscillating`/`equilibrium`, `unobserved`). Avoid them as identifiers when
 porting. The port's only collision was `prev`.
+
+---
+
+## F3 — `exit of N` ignores N and always exits 1 — OPEN (minor)
+
+`exit of 3` halts execution (correctly) but the process exit code is **1**, not
+3 — the argument is ignored. Repro: `print of "before"`; `exit of 3` →
+`before`, exit code 1. Likely because the teardown-routing fix made `exit` go
+through the error path unconditionally. The CLI only needs zero/nonzero, so
+this doesn't block the port, but a caller that wants a specific exit code can't
+get one. (Also unverified: whether `exit of 0` exits 0 or 1 — worth checking.)
+
+---
+
+## Positive result — M1 workload is ASan-clean
+
+Not a bug, recorded for the record: the Milestone-1 workload — the long-lived
+cluster object graph plus the churning event-queue heap, the shapes most likely
+to surface refcount cycles or leaks — runs **clean under AddressSanitizer +
+LeakSanitizer + UBSan** (15 seeds x 200 steps, a 500-step / 5-node run, and the
+`EIGS_TRACE` long-lived-tape path: no leaks, no UBSan reports, no refcount
+cycles). The runtime's refcount + cycle-collector discipline holds for this
+allocation pattern so far. Re-checked after every milestone.
