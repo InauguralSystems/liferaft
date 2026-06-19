@@ -1,0 +1,42 @@
+# Milestone 1 integration: 3 nodes, no adversary, one seed. Run N steps,
+# check all seven invariants after every step, and confirm a leader emerges.
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/scheduler.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+
+seed is 7
+steps is 60
+cluster is cluster_new of [3, prng_new of seed]
+
+violation is null
+violated_step is -1
+leader_seen is 0
+max_term is 1
+
+step is 0
+loop while step < steps and violation == null:
+    step is step + 1
+    cluster_step of cluster
+    v is check_invariants of cluster
+    if v != null:
+        violation is v
+        violated_step is step
+    leaders is cluster_leaders of cluster
+    if (len of leaders) == 1:
+        leader_seen is 1
+    for id in cluster.ids:
+        t is cluster.rafts[id].current_term
+        if t > max_term:
+            max_term is t
+
+if violation != null:
+    print of f"INVARIANT VIOLATED seed={seed} step={violated_step}: {violation}"
+else:
+    print of f"seed={seed} steps={steps} invariants=clean leader_seen={leader_seen} max_term={max_term}"
+
+if violation == null and leader_seen == 1:
+    print of "m1: all passed"
+else:
+    print of "m1: FAILED"

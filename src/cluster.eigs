@@ -1,0 +1,87 @@
+# In-memory cluster harness, driven by the deterministic scheduler.
+#
+# Ported in spirit from inmemory.go, but the Go channel/goroutine machinery is
+# replaced by the single-threaded discrete-event scheduler (src/scheduler.eigs).
+# Milestone 1: NO network adversary — messages deliver same-tick with zero
+# latency, ordered by insertion (the heap's seq tiebreak). The adversary
+# (latency, reorder, duplication, crash/restart), all driven by the one PRNG,
+# is added in a later milestone; its hooks are marked below.
+#
+# A cluster is:
+#   {ids:    [id...]              ordered node ids "1".."N"
+#    rafts:  {id -> raft}         the pure state machines
+#    states: {id -> persisted}    last persisted PersistentState (for restore)
+#    sched:  <scheduler>          the global event heap
+#    now:    <tick>               logical clock
+#    rng:    <prng>}              the one source of randomness
+
+define cluster_new(num_nodes, rng) as:
+    ids is []
+    for i in range of num_nodes:
+        append of [ids, str of (i + 1)]
+    rafts is {}
+    states is {}
+    for id in ids:
+        # Election timeout 5..8 ticks, drawn from the PRNG to break symmetry so
+        # one node times out first (matches the Go reference's NewInMemoryCluster).
+        ett is 5 + (prng_int of [rng, 4])
+        rafts[id] is new_raft of {"id": id, "cluster": ids, "election_timeout_tick": ett}
+        states[id] is null
+    return {"ids": ids, "rafts": rafts, "states": states,
+            "sched": sched_new of null, "now": 0, "rng": rng}
+
+# Persist a copy of a node's state (independent log list; entry dicts are never
+# mutated in place, so sharing them is safe). Used by restore on crash later.
+define cl_persist(cluster, id, persist) as:
+    log_copy is persist.log[0 : len of persist.log]
+    cluster.states[id] is {"current_term": persist.current_term,
+                           "voted_for": persist.voted_for, "log": log_copy}
+
+# Deliver one scheduled item to its target node and re-schedule any messages
+# the node emits.
+define cl_deliver(cluster, item) as:
+    raft is cluster.rafts[item.to]
+    updates is handle_event of [raft, item.ev]
+    if updates.persist != null:
+        cl_persist of [cluster, item.to, updates.persist]
+    for msg in updates.outgoing:
+        # M1: zero latency, deterministic order. The heap's seq tiebreak keeps
+        # same-(t,tie) events in insertion order. ADVERSARY HOOK: a later
+        # milestone draws latency and `tie` from cluster.rng here (and may drop
+        # or duplicate), so reordering/loss is reproducible from the seed.
+        sched_push of [cluster.sched, cluster.now, 0, msg.to, msg]
+
+# Drain every event due at or before `now` (M1: the whole same-tick cascade).
+define cl_drain(cluster, now) as:
+    s is cluster.sched
+    loop while not (sched_empty of s):
+        top is sched_peek of s
+        if top.t > now:
+            break
+        item is sched_pop of s
+        cl_deliver of [cluster, item]
+
+# Advance one tick: deliver a Tick to every node, then drain the cascade.
+define cluster_step(cluster) as:
+    cluster.now is cluster.now + 1
+    now is cluster.now
+    for id in cluster.ids:
+        sched_push of [cluster.sched, now, 0, id, {"kind": "tick"}]
+    cl_drain of [cluster, now]
+
+# --- observation helpers -------------------------------------------------
+
+define cluster_leaders(cluster) as:
+    out is []
+    for id in cluster.ids:
+        if cluster.rafts[id].role == "leader":
+            append of [out, id]
+    return out
+
+define cluster_max_committed(cluster) as:
+    m is 0
+    for id in cluster.ids:
+        c is cluster.rafts[id].committed_length
+        if c > m:
+            m is c
+    return m

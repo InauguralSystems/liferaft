@@ -1,0 +1,72 @@
+# liferaft CLI runner.
+#
+#   eigenscript liferaft.eigs --seed N --steps M [--nodes K] [--quiet] [--replay tape]
+#
+# Runs the deterministic simulation for one seed, checks all seven invariants
+# after every step, and prints a per-step trace to stdout (suppress with
+# --quiet). On the first invariant violation it prints `VIOLATION seed=.. step=..`
+# and exits nonzero. Output is a deterministic function of the seed: the same
+# seed in two fresh processes produces byte-identical stdout.
+#
+# Determinism is entirely seed-derived (no nondet builtins), so "replay" = rerun
+# with the same seed. `--replay tape` is accepted for the documented signature;
+# the orthogonal language-level tape replay is driven by EIGS_TRACE/EIGS_REPLAY
+# (see test/replay.sh) and, because the sim touches no nondet builtin, a
+# recorded tape carries zero `N` records.
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/scheduler.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+
+# ---- parse args ----
+seed is 1
+steps is 100
+nodes is 3
+quiet is 0
+
+argv is args of null
+i is 0
+loop while i < (len of argv):
+    a is argv[i]
+    if a == "--seed":
+        seed is num of argv[i + 1]
+        i is i + 2
+    elif a == "--steps":
+        steps is num of argv[i + 1]
+        i is i + 2
+    elif a == "--nodes":
+        nodes is num of argv[i + 1]
+        i is i + 2
+    elif a == "--replay":
+        i is i + 2
+    elif a == "--quiet":
+        quiet is 1
+        i is i + 1
+    else:
+        i is i + 1
+
+# ---- run ----
+cluster is cluster_new of [nodes, prng_new of seed]
+max_term is 1
+
+step is 0
+loop while step < steps:
+    step is step + 1
+    cluster_step of cluster
+    v is check_invariants of cluster
+    if v != null:
+        print of f"VIOLATION seed={seed} step={step}: {v}"
+        exit of 1
+    for id in cluster.ids:
+        t is cluster.rafts[id].current_term
+        if t > max_term:
+            max_term is t
+    if not quiet:
+        leaders is cluster_leaders of cluster
+        terms is [cluster.rafts[id].current_term for id in cluster.ids]
+        commit is cluster_max_committed of cluster
+        print of f"step={step} leaders={leaders} terms={terms} commit={commit}"
+
+final_leaders is cluster_leaders of cluster
+print of f"OK seed={seed} nodes={nodes} steps={steps} leaders={final_leaders} max_term={max_term}"

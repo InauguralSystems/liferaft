@@ -56,11 +56,16 @@ The CLI (once complete): `eigenscript liferaft.eigs --seed N --steps M [--replay
 
 ## Status
 
-Milestone 1 (leader election, 3 nodes, no adversary, one seed, invariants on,
-byte-for-byte replay) in progress. Done so far: deterministic PRNG (verified
-reproducible across processes) and the pure state machine (election path
-verified by hand-driven unit tests). Next: scheduler, invariants, cluster
-harness, CLI, and the replay test.
+**Milestone 1 complete** — leader election, 3 nodes, no adversary, one seed,
+all seven invariants checked every step, byte-for-byte replay working. Verified
+by `test/run.sh`: PRNG determinism, scheduler heap, state-machine election unit
+tests, a 3-node integration run, same-seed two-process determinism (5 seeds),
+`EIGS_TRACE`/`EIGS_REPLAY` byte-for-byte replay (zero nondet builtins), and a
+50-seed × 200-step sweep with all seven invariants holding.
+
+Next milestones: **M2** log replication (client applies + commit), **M3**
+network adversary (latency, reorder, duplication, crash/restart, all from the
+one seed), **M4** multi-seed chaos sweep with minimal-reproducing-seed reporting.
 
 ## Scope
 

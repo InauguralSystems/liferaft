@@ -1,0 +1,192 @@
+# The seven TLA+-derived Raft invariants, ported from invariants.go.
+#
+# These are the correctness ORACLE — ported faithfully, NOT simplified. Each
+# returns null on success or a human-readable violation string. check_invariants
+# runs all seven and returns the FIRST violation (or null).
+#
+# Determinism note: the Go invariants iterate `cluster.Nodemap` (a Go map) in
+# leaderInvariant / electionSafetyInvariant. Those are order-independent
+# reductions (counting leaders, taking a max), so map order doesn't change the
+# result — but for a deterministic port every invariant here iterates the
+# ordered `cluster.ids` list instead. (No behavior change; just no reliance on
+# iteration order anywhere.)
+#
+# A cluster is {ids: [id...], rafts: {id -> raft}, ...}.
+
+define inv_raft(cluster, id) as:
+    return cluster.rafts[id]
+
+# ---- entry / log helpers (mirror invariants.go) ------------------------
+
+define entry_eq(e1, e2) as:
+    return (e1.term == e2.term) and (e1.cmd == e2.cmd)
+
+define last_term(log) as:
+    if (len of log) == 0:
+        return 0
+    return log[(len of log) - 1].term
+
+define max_index_for_term(log, term) as:
+    i is (len of log) - 1
+    loop while i >= 0:
+        if log[i].term == term:
+            return i
+        i is i - 1
+    return 0
+
+# log1 is a prefix of log2 (elementwise entry_eq over log1's length)
+define log_is_prefix(log1, log2) as:
+    if (len of log1) > (len of log2):
+        return 0
+    i is 0
+    loop while i < (len of log1):
+        if not (entry_eq of [log1[i], log2[i]]):
+            return 0
+        i is i + 1
+    return 1
+
+# first `k` entries of both logs are entry-equal
+define logs_eq_prefix(log1, log2, k) as:
+    i is 0
+    loop while i < k:
+        if not (entry_eq of [log1[i], log2[i]]):
+            return 0
+        i is i + 1
+    return 1
+
+# ---- the seven invariants ----------------------------------------------
+
+# At most one leader per term.
+define leader_invariant(cluster) as:
+    counts is {}
+    for id in cluster.ids:
+        r is inv_raft of [cluster, id]
+        if r.role == "leader":
+            key is str of r.current_term
+            if has_key of [counts, key]:
+                counts[key] is counts[key] + 1
+            else:
+                counts[key] is 1
+    for key in keys of counts:
+        if counts[key] > 1:
+            return f"leader_invariant: {counts[key]} leaders for term {key}"
+    return null
+
+# Committed log entries never conflict between servers.
+define log_invariant(cluster) as:
+    ids is cluster.ids
+    for i in range of (len of ids):
+        log1 is committed_log of (inv_raft of [cluster, ids[i]])
+        for j in range of (len of ids):
+            if j > i:
+                log2 is committed_log of (inv_raft of [cluster, ids[j]])
+                check_len is min of [len of log1, len of log2]
+                if not (logs_eq_prefix of [log1, log2, check_len]):
+                    return f"log_invariant: committed log conflict between {ids[i]} and {ids[j]}"
+    return null
+
+# Every (index, term) pair determines a log prefix.
+define log_prefix_invariant(cluster) as:
+    ids is cluster.ids
+    for i in range of (len of ids):
+        log1 is (inv_raft of [cluster, ids[i]]).log
+        for j in range of (len of ids):
+            if j > i:
+                log2 is (inv_raft of [cluster, ids[j]]).log
+                idx is (min of [len of log1, len of log2]) - 1
+                loop while idx >= 0:
+                    if log1[idx].term == log2[idx].term:
+                        if not (logs_eq_prefix of [log1, log2, idx]):
+                            return f"log_prefix_invariant: prefixes differ between {ids[i]} and {ids[j]} at index {idx}"
+                        break
+                    idx is idx - 1
+    return null
+
+# A leader has the greatest index for its current term.
+define election_safety_invariant(cluster) as:
+    for id in cluster.ids:
+        r is inv_raft of [cluster, id]
+        if r.role == "leader":
+            term is r.current_term
+            lidx is max_index_for_term of [r.log, term]
+            for id2 in cluster.ids:
+                r2 is inv_raft of [cluster, id2]
+                ridx is max_index_for_term of [r2.log, term]
+                if lidx < ridx:
+                    return f"election_safety_invariant: leader {id} lacks greatest index for term {term}"
+    return null
+
+# All committed entries are on a majority of servers.
+define quorum_log_invariant(cluster) as:
+    ids is cluster.ids
+    q is quorum_size_n of (len of ids)
+    for id in ids:
+        committed is committed_log of (inv_raft of [cluster, id])
+        count is 1
+        for id2 in ids:
+            if id2 != id:
+                if log_is_prefix of [committed, (inv_raft of [cluster, id2]).log]:
+                    count is count + 1
+        if count < q:
+            return f"quorum_log_invariant: committed log for {id} not on a majority"
+    return null
+
+# The up-to-date vote check implies i gets j's vote only if i has all of j's
+# committed entries.
+define more_up_to_date_invariant(cluster) as:
+    ids is cluster.ids
+    for i in range of (len of ids):
+        r1 is inv_raft of [cluster, ids[i]]
+        log1 is r1.log
+        for j in range of (len of ids):
+            if j > i:
+                r2 is inv_raft of [cluster, ids[j]]
+                log2 is r2.log
+                more is 0
+                if (last_term of log1) > (last_term of log2):
+                    more is 1
+                elif (last_term of log1) == (last_term of log2) and (len of log1) >= (len of log2):
+                    more is 1
+                if more:
+                    if not (log_is_prefix of [committed_log of r2, log1]):
+                        return f"more_up_to_date_invariant: committed log on {ids[j]} not a prefix of {ids[i]}"
+    return null
+
+# A committed entry is present in the logs of all higher-term leaders.
+define leader_completeness_invariant(cluster) as:
+    for id in cluster.ids:
+        committed is committed_log of (inv_raft of [cluster, id])
+        if (len of committed) > 0:
+            last_idx is (len of committed) - 1
+            for id2 in cluster.ids:
+                r2 is inv_raft of [cluster, id2]
+                if id2 != id and r2.role == "leader":
+                    if r2.current_term > committed[last_idx].term:
+                        if not (entry_eq of [r2.log[last_idx], committed[last_idx]]):
+                            return f"leader_completeness_invariant: committed log on {id} mismatches leader {id2}"
+    return null
+
+# Run all seven; return the first violation message, or null if all hold.
+define check_invariants(cluster) as:
+    v is leader_invariant of cluster
+    if v != null:
+        return v
+    v is log_invariant of cluster
+    if v != null:
+        return v
+    v is log_prefix_invariant of cluster
+    if v != null:
+        return v
+    v is election_safety_invariant of cluster
+    if v != null:
+        return v
+    v is quorum_log_invariant of cluster
+    if v != null:
+        return v
+    v is more_up_to_date_invariant of cluster
+    if v != null:
+        return v
+    v is leader_completeness_invariant of cluster
+    if v != null:
+        return v
+    return null
