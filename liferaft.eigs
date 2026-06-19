@@ -47,6 +47,10 @@ loop while i < (len of argv):
     elif a == "--adversary":
         adversary is 1
         i is i + 1
+    elif a == "--fault":
+        if argv[i + 1] == "uptodate":
+            RAFT_FAULT_NO_UPTODATE is 1
+        i is i + 2
     elif a == "--replay":
         i is i + 2
     elif a == "--quiet":

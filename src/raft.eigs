@@ -28,6 +28,13 @@
 #          | {kind: "relay_apply", apply}
 #   updates = {persist: <state>|null, apply: [<apply_result>], outgoing: [<message>]}
 
+# Fault-injection toggle (OFF by default). When set to 1, candidates skip the
+# log-up-to-date check before granting a vote — a real Raft safety bug (a stale
+# candidate can win and overwrite committed entries). The M4 sweep flips this on
+# to prove the invariant oracle + minimizer actually catch and shrink a real
+# violation; a sweep that can never fail would prove nothing about detection.
+RAFT_FAULT_NO_UPTODATE is 0
+
 # ---- small constructors -------------------------------------------------
 
 define no_entry as:
@@ -178,7 +185,10 @@ define handle_request_vote(raft, msg, req) as:
     # as up-to-date as ours, grant the vote (Raft 5.2, 5.4).
     if raft.self_member.voted_for == "" or raft.self_member.voted_for == msg.from:
         my_last is log_status of raft
-        if einfo_gte of [req.last_log_entry, my_last]:
+        up_to_date is einfo_gte of [req.last_log_entry, my_last]
+        if RAFT_FAULT_NO_UPTODATE:
+            up_to_date is 1   # FAULT: grant regardless of log up-to-dateness
+        if up_to_date:
             res.vote_granted is 1
             raft.ticks is 0
             raft.self_member.voted_for is msg.from

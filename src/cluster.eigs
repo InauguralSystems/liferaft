@@ -133,6 +133,33 @@ define cl_crash(cluster, cid) as:
     cluster.applied[cid] is []
     sched_drop_to of [cluster.sched, cid]
 
+# Run one seed to completion (or to the first violation). Checks all seven
+# invariants AND applied-stream safety after every step. Returns a result dict;
+# `step` on a violation is the FIRST step at which it occurs — already the
+# minimal step count for that seed (per-step detection), so no step-shrinking
+# pass is needed. Used by the M4 sweep.
+define cluster_run(seed, nodes, apply_period, adv, max_steps) as:
+    cluster is cluster_new of [nodes, prng_new of seed, apply_period, adv]
+    max_term is 1
+    step is 0
+    loop while step < max_steps:
+        step is step + 1
+        cluster_step of cluster
+        v is check_invariants of cluster
+        if v == null:
+            v is cluster_applied_consistent of cluster
+        if v != null:
+            return {"violated": 1, "seed": seed, "step": step, "msg": v,
+                    "committed": cluster_min_committed of cluster,
+                    "submitted": cluster.cmd_counter, "max_term": max_term}
+        for id in cluster.ids:
+            t is cluster.rafts[id].current_term
+            if t > max_term:
+                max_term is t
+    return {"violated": 0, "seed": seed, "step": max_steps, "msg": null,
+            "committed": cluster_min_committed of cluster,
+            "submitted": cluster.cmd_counter, "max_term": max_term}
+
 # --- observation helpers -------------------------------------------------
 
 define cluster_leaders(cluster) as:

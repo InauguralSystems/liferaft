@@ -126,6 +126,9 @@ refcount cycles — across the shapes most likely to surface runtime memory bugs
   heap `drop_to` filtering, message duplication): a 2000-step / 5-node full-chaos
   run (355 submitted, 351 committed on every node, several re-elections) plus
   10 seeds x 600 steps of chaos.
+- **M4** (adds the sweep: repeated cluster create/teardown across seeds + the
+  violation/`exit` path): 15 seeds x 500 steps clean-sweep churn plus the
+  fault-injection abort path — no leaks across cluster lifetimes.
 
 The runtime's refcount + cycle-collector discipline holds for these allocation
 patterns. Re-checked after every milestone.

@@ -56,7 +56,7 @@ The CLI (once complete): `eigenscript liferaft.eigs --seed N --steps M [--replay
 
 ## Status
 
-**Milestones 1–3 complete.** Verified by `test/run.sh`:
+**Milestones 1–4 complete** — the full DST. Verified by `test/run.sh`:
 - **M1 leader election** — PRNG determinism, scheduler heap, state-machine
   election unit tests, 3-node integration, same-seed two-process determinism,
   `EIGS_TRACE`/`EIGS_REPLAY` byte-for-byte (zero nondet builtins).
@@ -70,8 +70,17 @@ The CLI (once complete): `eigenscript liferaft.eigs --seed N --steps M [--replay
   (5 seeds × 400 steps), and a 40-seed × 600-step × 5-node adversary sweep is
   clean. ASan-clean throughout (incl. crash/restart churn).
 
-Next: **M4** — large multi-seed chaos sweep with automatic minimal-reproducing-seed
-reporting on the first invariant violation.
+- **M4 chaos sweep + minimal-reproducing-seed reporting** (`liferaft_sweep.eigs`):
+  sweeps seeds 1..N under the adversary, checking all invariants every step; on
+  the first failure it reports the smallest failing seed and the first
+  (minimal) violating step, then re-runs that exact `(seed, steps)` to **verify**
+  the minimal repro and prints the runnable command. Validated both ways: the
+  correct port sweeps clean (40 seeds × 600 steps), and an injected fault
+  (`--fault uptodate`, a stale candidate winning — a real Raft safety bug) is
+  caught and shrunk to a verified `--seed 1 --steps 75` repro.
+
+The DST is complete. Possible extensions: snapshotting, membership changes,
+larger automated sweeps in CI.
 
 ## Scope
 

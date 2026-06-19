@@ -1,0 +1,91 @@
+# liferaft chaos sweep — the exploration driver.
+#
+#   eigenscript liferaft_sweep.eigs [--seeds N] [--steps M] [--nodes K]
+#                                   [--apply-period P] [--no-adversary]
+#                                   [--fault uptodate]
+#
+# Runs seeds 1..N (in order) under the network adversary, checking all seven
+# invariants plus applied-stream safety after every step. On the FIRST failing
+# seed it reports the minimal reproducing case and stops:
+#   - smallest seed: the sweep runs in increasing seed order, so the first
+#     failure is the smallest failing seed in [1, N];
+#   - minimal steps: per-step detection means the reported step is the first
+#     step at which the violation appears — already minimal for that seed.
+# It then re-runs exactly that (seed, steps) to verify the minimal repro, and
+# prints the exact command to reproduce it. Exits nonzero on a violation.
+#
+# A clean sweep is necessary but not sufficient, so `--fault uptodate` injects a
+# real Raft safety bug to prove the oracle + minimizer actually fire and shrink.
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/scheduler.eigs"
+load_file of "src/adversary.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+
+seeds is 100
+steps is 600
+nodes is 5
+apply_period is 6
+use_adversary is 1
+fault is ""
+
+argv is args of null
+i is 0
+loop while i < (len of argv):
+    a is argv[i]
+    if a == "--seeds":
+        seeds is num of argv[i + 1]
+        i is i + 2
+    elif a == "--steps":
+        steps is num of argv[i + 1]
+        i is i + 2
+    elif a == "--nodes":
+        nodes is num of argv[i + 1]
+        i is i + 2
+    elif a == "--apply-period":
+        apply_period is num of argv[i + 1]
+        i is i + 2
+    elif a == "--no-adversary":
+        use_adversary is 0
+        i is i + 1
+    elif a == "--fault":
+        fault is argv[i + 1]
+        i is i + 2
+    else:
+        i is i + 1
+
+adv is adv_none of null
+if use_adversary:
+    adv is adv_chaos of null
+
+fault_suffix is ""
+if fault == "uptodate":
+    RAFT_FAULT_NO_UPTODATE is 1
+    fault_suffix is " --fault uptodate"
+
+adv_suffix is " --adversary"
+if not use_adversary:
+    adv_suffix is ""
+
+# ---- sweep ----
+first_fail is null
+checked is 0
+seed is 1
+loop while seed <= seeds and first_fail == null:
+    r is cluster_run of [seed, nodes, apply_period, adv, steps]
+    checked is checked + 1
+    if r.violated:
+        first_fail is r
+    seed is seed + 1
+
+if first_fail == null:
+    print of f"SWEEP CLEAN: {checked} seeds x {steps} steps x {nodes} nodes — all seven invariants + applied-stream safety held every step"
+else:
+    print of f"VIOLATION FOUND seed={first_fail.seed} step={first_fail.step}: {first_fail.msg}"
+    # Verify the minimal repro reproduces at exactly the reported step.
+    v2 is cluster_run of [first_fail.seed, nodes, apply_period, adv, first_fail.step]
+    ok is v2.violated and (v2.step == first_fail.step)
+    print of f"minimal repro (verified={ok}):"
+    print of f"  eigenscript liferaft.eigs --seed {first_fail.seed} --steps {first_fail.step} --nodes {nodes} --apply-period {apply_period}{adv_suffix}{fault_suffix}"
+    exit of 1

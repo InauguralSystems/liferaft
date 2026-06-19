@@ -53,15 +53,22 @@ for s in 1 7 42 31415 99999; do
 done
 [ "$adet_ok" -eq 1 ] && echo "PASS: adversary determinism (5 seeds x 400 steps, byte-identical)"
 
-echo "--- adversary sweep (chaos: latency/reorder/drop/dup/crash, invariants every step) ---"
-asweep_ok=1
-for s in $(seq 1 40); do
-  out="$("$EIGS" liferaft.eigs --seed "$s" --steps 600 --nodes 5 --apply-period 6 --adversary --quiet 2>/dev/null)"
-  if printf '%s\n' "$out" | grep -q "^VIOLATION"; then
-    echo "FAIL: $(printf '%s\n' "$out" | grep '^VIOLATION')"; asweep_ok=0; fail=1
-  fi
-done
-[ "$asweep_ok" -eq 1 ] && echo "PASS: adversary sweep (40 seeds x 600 steps, 5 nodes)"
+echo "--- M4 chaos sweep + minimal-reproducing-seed reporting ---"
+# Fault OFF: the correct port must survive the whole sweep clean.
+out="$("$EIGS" liferaft_sweep.eigs --seeds 40 --steps 600 2>/dev/null)"
+if printf '%s\n' "$out" | grep -q '^SWEEP CLEAN'; then
+  echo "PASS: M4 sweep clean ($(printf '%s\n' "$out" | grep '^SWEEP CLEAN' | sed 's/SWEEP CLEAN: //'))"
+else
+  echo "FAIL: M4 clean sweep"; printf '%s\n' "$out" | tail -3; fail=1
+fi
+# Fault ON: the oracle + minimizer must catch a real violation AND verify the
+# minimal repro. A sweep that can never fail would prove nothing about detection.
+out="$("$EIGS" liferaft_sweep.eigs --seeds 40 --steps 600 --fault uptodate 2>/dev/null)"
+if printf '%s\n' "$out" | grep -q '^VIOLATION FOUND' && printf '%s\n' "$out" | grep -q 'verified=1'; then
+  echo "PASS: M4 fault injection caught + minimal repro verified ($(printf '%s\n' "$out" | grep '^VIOLATION FOUND' | sed 's/VIOLATION FOUND //'))"
+else
+  echo "FAIL: M4 fault injection not caught/verified"; printf '%s\n' "$out" | tail -4; fail=1
+fi
 
 echo "---"
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOME FAILED"; fi

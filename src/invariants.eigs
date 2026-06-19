@@ -162,8 +162,14 @@ define leader_completeness_invariant(cluster) as:
                 r2 is inv_raft of [cluster, id2]
                 if id2 != id and r2.role == "leader":
                     if r2.current_term > committed[last_idx].term:
-                        if not (entry_eq of [r2.log[last_idx], committed[last_idx]]):
-                            return f"leader_completeness_invariant: committed log on {id} mismatches leader {id2}"
+                        # The Go original indexes r2.log[lastIdx] directly,
+                        # assuming leader completeness holds. When it DOESN'T
+                        # (a higher-term leader has a shorter log), that index is
+                        # out of range — which IS the violation. Guard it so the
+                        # oracle reports cleanly instead of aborting on the index
+                        # (same detection; `or` short-circuits before indexing).
+                        if last_idx >= (len of r2.log) or not (entry_eq of [r2.log[last_idx], committed[last_idx]]):
+                            return f"leader_completeness_invariant: committed entry {last_idx} on {id} missing from / mismatches higher-term leader {id2}"
     return null
 
 # Run all seven; return the first violation message, or null if all hold.
