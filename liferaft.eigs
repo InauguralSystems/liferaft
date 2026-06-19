@@ -16,6 +16,7 @@
 load_file of "src/prng.eigs"
 load_file of "src/raft.eigs"
 load_file of "src/scheduler.eigs"
+load_file of "src/adversary.eigs"
 load_file of "src/invariants.eigs"
 load_file of "src/cluster.eigs"
 
@@ -24,6 +25,7 @@ seed is 1
 steps is 100
 nodes is 3
 apply_period is 8   # M2: inject a client command with prob 1/8 each step; 0 = none
+adversary is 0      # M3: --adversary turns on the chaotic network model
 quiet is 0
 
 argv is args of null
@@ -42,6 +44,9 @@ loop while i < (len of argv):
     elif a == "--apply-period":
         apply_period is num of argv[i + 1]
         i is i + 2
+    elif a == "--adversary":
+        adversary is 1
+        i is i + 1
     elif a == "--replay":
         i is i + 2
     elif a == "--quiet":
@@ -51,7 +56,10 @@ loop while i < (len of argv):
         i is i + 1
 
 # ---- run ----
-cluster is cluster_new of [nodes, prng_new of seed, apply_period]
+adv is adv_none of null
+if adversary:
+    adv is adv_chaos of null
+cluster is cluster_new of [nodes, prng_new of seed, apply_period, adv]
 max_term is 1
 
 step is 0

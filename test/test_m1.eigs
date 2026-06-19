@@ -3,6 +3,7 @@
 load_file of "src/prng.eigs"
 load_file of "src/raft.eigs"
 load_file of "src/scheduler.eigs"
+load_file of "src/adversary.eigs"
 load_file of "src/invariants.eigs"
 load_file of "src/cluster.eigs"
 

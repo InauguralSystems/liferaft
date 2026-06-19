@@ -97,7 +97,21 @@ get one. (Also unverified: whether `exit of 0` exits 0 or 1 — worth checking.)
 
 ---
 
-## Positive result — M1 & M2 workloads are ASan-clean
+## Methodology note — the adversary caught a harness bug (not a runtime bug)
+
+Recorded because it shows the loop working. The moment the M3 network adversary
+turned on, the applied-stream safety check fired immediately:
+`applied conflict between 1 and 4 at 51: 'cmd:53' vs 'cmd:2'`. The signature —
+an *early* command (`cmd:2`) at a *late* index — pointed away from Raft and at
+the observation layer: when a node crashes and restarts, its state machine
+resets (`applied_length = 0`) and legitimately *re-applies* its committed log,
+but the harness's `cluster.applied[id]` list kept appending, so the re-application
+read as a conflict. Fix: reset `cluster.applied[cid]` on restart (the state
+machine is rebuilt from the log; Raft guarantees the rebuilt prefix matches).
+After the fix, 40 seeds × 600 steps of full chaos run clean. No EigenScript or
+protocol bug — a modeling error in the checker, surfaced exactly as intended.
+
+## Positive result — M1, M2 & M3 workloads are ASan-clean
 
 Not a bug, recorded for the record: the simulation runs **clean under
 AddressSanitizer + LeakSanitizer + UBSan** — no leaks, no UBSan reports, no
@@ -108,6 +122,10 @@ refcount cycles — across the shapes most likely to surface runtime memory bugs
 - **M2** (adds growing per-node logs + apply-result churn): a 800-step /
   5-node / apply-every-4 run (185 commands submitted, 183 committed on every
   node) plus 12 seeds x 300 steps with applies.
+- **M3** (adds the adversary: crash/restart `new_raft` churn, log-restore,
+  heap `drop_to` filtering, message duplication): a 2000-step / 5-node full-chaos
+  run (355 submitted, 351 committed on every node, several re-elections) plus
+  10 seeds x 600 steps of chaos.
 
 The runtime's refcount + cycle-collector discipline holds for these allocation
 patterns. Re-checked after every milestone.

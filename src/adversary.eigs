@@ -1,0 +1,45 @@
+# Network adversary model. Every decision is a draw from the one seeded PRNG,
+# so the entire adversarial run reproduces from the seed. The harness
+# (cluster.eigs) must call these in a fixed order per message / per step — that
+# fixed order is what keeps the PRNG draw sequence, and therefore the whole run,
+# deterministic.
+#
+# Config:
+#   max_latency : max extra ticks a message can be delayed (0 = deliver same tick)
+#   drop_n      : drop a message with probability 1/drop_n   (0 = never)
+#   dup_n       : duplicate a message with probability 1/dup_n (0 = never)
+#   crash_n     : crash+restart a node with probability 1/crash_n per step (0 = never)
+#   reorder     : truthy => same-tick delivery order is PRNG-shuffled via the heap tiebreak
+
+define adv_none as:
+    return {"max_latency": 0, "drop_n": 0, "dup_n": 0, "crash_n": 0, "reorder": 0}
+
+# A chaotic-but-progress-permitting profile: messages are delayed, reordered,
+# sometimes dropped or duplicated, and nodes occasionally crash and restart from
+# persisted state. Disruptions are frequent enough to exercise every recovery
+# path over a long run, but sparse enough that the cluster can still elect
+# leaders and commit (heartbeats retry past drops and delays).
+define adv_chaos as:
+    return {"max_latency": 3, "drop_n": 15, "dup_n": 25, "crash_n": 400, "reorder": 1}
+
+# Extra delivery delay in ticks, in [0, max_latency].
+define adv_latency(adv, rng) as:
+    if adv.max_latency <= 0:
+        return 0
+    return prng_int of [rng, adv.max_latency + 1]
+
+# Same-tick ordering key: a PRNG draw when reordering is on (shuffles same-tick
+# deliveries reproducibly), else 0 (insertion order via the heap's seq).
+define adv_tie(adv, rng) as:
+    if adv.reorder:
+        return prng_int of [rng, 1000000]
+    return 0
+
+define adv_drop(adv, rng) as:
+    return adv.drop_n > 0 and (prng_chance of [rng, adv.drop_n])
+
+define adv_dup(adv, rng) as:
+    return adv.dup_n > 0 and (prng_chance of [rng, adv.dup_n])
+
+define adv_crash(adv, rng) as:
+    return adv.crash_n > 0 and (prng_chance of [rng, adv.crash_n])

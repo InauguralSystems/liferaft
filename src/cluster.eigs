@@ -15,7 +15,9 @@
 #    now:    <tick>               logical clock
 #    rng:    <prng>}              the one source of randomness
 
-define cluster_new(num_nodes, rng, apply_period is 0) as:
+define cluster_new(num_nodes, rng, apply_period is 0, adv is null) as:
+    if adv == null:
+        adv is adv_none of null
     ids is []
     for i in range of num_nodes:
         append of [ids, str of (i + 1)]
@@ -31,8 +33,9 @@ define cluster_new(num_nodes, rng, apply_period is 0) as:
         applied[id] is []
     # apply_period = 0 disables client applies (M1 pure-election mode); > 0 means
     # inject a command with probability 1/apply_period each step (M2+).
+    # adv is the network adversary config (adv_none = M1/M2 reliable network).
     return {"ids": ids, "rafts": rafts, "states": states, "applied": applied,
-            "sched": sched_new of null, "now": 0, "rng": rng,
+            "sched": sched_new of null, "now": 0, "rng": rng, "adv": adv,
             "apply_period": apply_period, "cmd_counter": 0}
 
 # Persist a copy of a node's state (independent log list; entry dicts are never
@@ -56,11 +59,24 @@ define cl_deliver(cluster, item) as:
         if res.cmd != null:
             append of [cluster.applied[item.to], res.cmd]
     for msg in updates.outgoing:
-        # M1: zero latency, deterministic order. The heap's seq tiebreak keeps
-        # same-(t,tie) events in insertion order. ADVERSARY HOOK: a later
-        # milestone draws latency and `tie` from cluster.rng here (and may drop
-        # or duplicate), so reordering/loss is reproducible from the seed.
-        sched_push of [cluster.sched, cluster.now, 0, msg.to, msg]
+        cl_schedule_msg of [cluster, msg]
+
+# Schedule one outgoing message through the network adversary. Draw order is
+# fixed (drop, then latency, then tie, then dup) so the PRNG sequence stays a
+# deterministic function of the seed. adv_none makes this zero-latency,
+# in-order, lossless delivery (M1/M2).
+define cl_schedule_msg(cluster, msg) as:
+    adv is cluster.adv
+    rng is cluster.rng
+    if adv_drop of [adv, rng]:
+        return    # message lost on the wire; sender retries via heartbeat
+    lat is adv_latency of [adv, rng]
+    tie is adv_tie of [adv, rng]
+    sched_push of [cluster.sched, cluster.now + lat, tie, msg.to, msg]
+    if adv_dup of [adv, rng]:
+        lat2 is adv_latency of [adv, rng]
+        tie2 is adv_tie of [adv, rng]
+        sched_push of [cluster.sched, cluster.now + lat2, tie2, msg.to, msg]
 
 # Drain every event due at or before `now` (M1: the whole same-tick cascade).
 define cl_drain(cluster, now) as:
@@ -90,7 +106,32 @@ define cluster_step(cluster) as:
                 if cluster.rafts[id].role == "leader":
                     sched_push of [cluster.sched, now, 0, id,
                                    {"kind": "apply", "cmd": cmd, "client_id": ""}]
+    # M3: crash + restart a random node from its persisted state.
+    if adv_crash of [cluster.adv, cluster.rng]:
+        idx is prng_int of [cluster.rng, len of cluster.ids]
+        cl_crash of [cluster, cluster.ids[idx]]
     cl_drain of [cluster, now]
+
+# Crash a node and restart it from persisted state: volatile state (role, ticks,
+# matchIndex, leaderID) resets; persistent state (currentTerm, log, votedFor)
+# survives via cluster.states[id]. In-flight messages to it are dropped (socket
+# buffer lost). A fresh randomized election timeout is drawn on restart (a real
+# node re-randomizes; this also avoids restarted nodes sharing one timeout). If
+# the node never persisted (states[id] == null), it comes back empty — faithful
+# to the reference, since only Message events persist.
+define cl_crash(cluster, cid) as:
+    state is cluster.states[cid]
+    ett is 5 + (prng_int of [cluster.rng, 4])
+    cfg is {"id": cid, "cluster": cluster.ids, "election_timeout_tick": ett,
+            "restore_state": state}
+    cluster.rafts[cid] is new_raft of cfg
+    # The restarted node's state machine is rebuilt from its log: applied_length
+    # resets to 0 and it re-applies its committed entries. So the OBSERVED applied
+    # stream must reset too — otherwise the legitimate re-application reads as a
+    # conflict against the pre-crash stream. (Raft guarantees the rebuilt prefix
+    # matches, so cross-node applied-consistency still holds.)
+    cluster.applied[cid] is []
+    sched_drop_to of [cluster.sched, cid]
 
 # --- observation helpers -------------------------------------------------
 

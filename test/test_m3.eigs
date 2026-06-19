@@ -1,0 +1,51 @@
+# Milestone 3 integration: network adversary. 5 nodes under the chaotic network
+# model (latency, reordering, duplication, drops, crash/restart), client applies
+# injected. All seven invariants AND applied-stream safety must hold after EVERY
+# step despite the chaos, and the cluster must still make real progress.
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/scheduler.eigs"
+load_file of "src/adversary.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+
+seed is 11
+steps is 1500
+cluster is cluster_new of [5, prng_new of seed, 6, adv_chaos of null]
+
+violation is null
+viol_step is -1
+max_term is 1
+step is 0
+loop while step < steps and violation == null:
+    step is step + 1
+    cluster_step of cluster
+    v is check_invariants of cluster
+    if v != null:
+        violation is v
+        viol_step is step
+    av is cluster_applied_consistent of cluster
+    if violation == null and av != null:
+        violation is av
+        viol_step is step
+    for id in cluster.ids:
+        t is cluster.rafts[id].current_term
+        if t > max_term:
+            max_term is t
+
+mincommit is cluster_min_committed of cluster
+maxcommit is cluster_max_committed of cluster
+submitted is cluster.cmd_counter
+
+if violation != null:
+    print of f"m3 VIOLATION seed={seed} step={viol_step}: {violation}"
+else:
+    print of f"seed={seed} steps={steps} submitted={submitted} committed={mincommit}/{maxcommit} max_term={max_term} invariants=clean applied=consistent"
+
+# Safety: no violations. Liveness despite chaos: real replication (>=20 commands
+# committed on every node). Adversary actually bit: re-elections happened
+# (max_term advanced well past the first election).
+if violation == null and mincommit >= 20 and max_term > 2:
+    print of "m3: all passed"
+else:
+    print of "m3: FAILED"

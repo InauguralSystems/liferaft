@@ -56,16 +56,22 @@ The CLI (once complete): `eigenscript liferaft.eigs --seed N --steps M [--replay
 
 ## Status
 
-**Milestone 1 complete** — leader election, 3 nodes, no adversary, one seed,
-all seven invariants checked every step, byte-for-byte replay working. Verified
-by `test/run.sh`: PRNG determinism, scheduler heap, state-machine election unit
-tests, a 3-node integration run, same-seed two-process determinism (5 seeds),
-`EIGS_TRACE`/`EIGS_REPLAY` byte-for-byte replay (zero nondet builtins), and a
-50-seed × 200-step sweep with all seven invariants holding.
+**Milestones 1–3 complete.** Verified by `test/run.sh`:
+- **M1 leader election** — PRNG determinism, scheduler heap, state-machine
+  election unit tests, 3-node integration, same-seed two-process determinism,
+  `EIGS_TRACE`/`EIGS_REPLAY` byte-for-byte (zero nondet builtins).
+- **M2 log replication** — client applies, commit propagation, applied-stream
+  safety; commands replicate to every node; 50-seed × 200-step invariant sweep.
+- **M3 network adversary** — latency, reordering, duplication, drops, and
+  crash/restart, all from the one seed. Under full chaos the cluster still
+  elects leaders (repeatedly), replicates, and commits hundreds of commands
+  with all seven invariants + applied-stream safety holding every step.
+  **Determinism holds under chaos**: same seed in two processes is byte-identical
+  (5 seeds × 400 steps), and a 40-seed × 600-step × 5-node adversary sweep is
+  clean. ASan-clean throughout (incl. crash/restart churn).
 
-Next milestones: **M2** log replication (client applies + commit), **M3**
-network adversary (latency, reorder, duplication, crash/restart, all from the
-one seed), **M4** multi-seed chaos sweep with minimal-reproducing-seed reporting.
+Next: **M4** — large multi-seed chaos sweep with automatic minimal-reproducing-seed
+reporting on the first invariant violation.
 
 ## Scope
 
