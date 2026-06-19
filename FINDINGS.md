@@ -109,6 +109,42 @@ get one. (Also unverified: whether `exit of 0` exits 0 or 1 — worth checking.)
 
 ---
 
+## F4 — observed `loop while` silently truncated the DST's loops (global-observer convergence-halt) — FIXED (EigenScript PR #247, merged `a17d983`)
+
+**Severity: high — the deepest finding.** Surfaced while benchmarking against the
+Go original. The benchmark numbers were nonsense (EigenScript appeared *faster*
+than compiled Go), and chasing that exposed that the sim's outcome was not a pure
+function of the seed: same seed, same params, `committed` came out **6 / 8 / 12 /
+21** depending only on how much unrelated read-only work ran per step.
+
+**Root cause (in EigenScript, not liferaft):** every observed `loop while`
+emitted `OP_LOOP_STALL_CHECK`, which auto-exited the loop when the **global**
+`g_last_observer` showed convergence for ~100 iterations — including plain
+counting loops. Because the observer is global, the DST's driving loops
+(`loop while step < max_steps`, `loop while not sched_empty`) were halted by
+whatever value the loop body — or a function it called — last assigned. A bounded
+`loop while step < 1000` **halted at step 146** while the cluster was still
+actively committing (`committed=6` at the halt, `21` if allowed to finish). The
+invariants still passed (a truncated run is a valid Raft prefix), so it was
+invisible until the benchmark leaned on long loops.
+
+The diagnosis ruled out, in order: JIT (reproduced JIT-off), `NUM_REUSE`
+arithmetic (disabled it, no change), the number freelist + a premature-free UAF
+(disabled the freelist, ASan-clean), before landing on the loop-halting
+semantics. The `100` threshold was a prototype constant that ossified into
+load-bearing semantics and was never revisited.
+
+**Fix (upstream):** convergence-halting is now **opt-in** — only a loop whose
+condition references a predicate (`loop while not converged`) gets the
+observer-stall; plain loops get a cap-only check. Compositional again. The
+liferaft loops are all plain, so **the port needed no `unobserved` workaround** —
+fixing the language fixed the consumer for free.
+
+**Minimal repro** (no sim needed — any plain loop whose body settles the global
+observer): the loop's iteration count changes with unrelated assignments, and
+`__loop_exit__` reads `"stalled"` on a bounded loop that can't be
+non-terminating. Pre-fix only. See EigenScript `tests/test_loop_halting.sh`.
+
 ## Methodology note — the adversary caught a harness bug (not a runtime bug)
 
 Recorded because it shows the loop working. The moment the M3 network adversary
