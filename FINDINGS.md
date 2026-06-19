@@ -12,7 +12,19 @@ doesn't relearn it).
 
 ---
 
-## F1 — `load_file` silently accepts a parse error that direct execution rejects (a discarded assignment) — OPEN
+## F1 — `load_file` silently accepts a parse error that direct execution rejects (a discarded assignment) — FIXED (EigenScript PR #245, merged `021c23d`)
+
+**Fix:** `load_file` now checks `g_parse_errors` after parsing and raises a
+catchable `load_file: parse error in '<path>'` instead of running a partial AST,
+matching `eval`/`import`. Turning the check on immediately caught a latent bug it
+had been masking — `lib/lab.eigs` used the reserved keyword `stable` as a
+variable, so `stable is 0/1` were silently-dropped parse errors (renamed to
+`stable_flag`). Two silent parser error sites also now print a line number. The
+dangerous half of F1 (silent acceptance) is resolved and behavior is now
+consistent everywhere; expression-rooted lvalues remain unsupported but fail
+cleanly in both paths (a feature, not a bug — out of scope). Original report
+below.
+
 
 **Severity: high.** An unsupported lvalue — assigning to a field of a
 function-call result, `(call).field is X` — is a **parse error** when the file
