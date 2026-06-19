@@ -97,12 +97,17 @@ get one. (Also unverified: whether `exit of 0` exits 0 or 1 — worth checking.)
 
 ---
 
-## Positive result — M1 workload is ASan-clean
+## Positive result — M1 & M2 workloads are ASan-clean
 
-Not a bug, recorded for the record: the Milestone-1 workload — the long-lived
-cluster object graph plus the churning event-queue heap, the shapes most likely
-to surface refcount cycles or leaks — runs **clean under AddressSanitizer +
-LeakSanitizer + UBSan** (15 seeds x 200 steps, a 500-step / 5-node run, and the
-`EIGS_TRACE` long-lived-tape path: no leaks, no UBSan reports, no refcount
-cycles). The runtime's refcount + cycle-collector discipline holds for this
-allocation pattern so far. Re-checked after every milestone.
+Not a bug, recorded for the record: the simulation runs **clean under
+AddressSanitizer + LeakSanitizer + UBSan** — no leaks, no UBSan reports, no
+refcount cycles — across the shapes most likely to surface runtime memory bugs.
+
+- **M1** (long-lived cluster graph + churning event heap): 15 seeds x 200
+  steps, a 500-step / 5-node run, and the `EIGS_TRACE` long-lived-tape path.
+- **M2** (adds growing per-node logs + apply-result churn): a 800-step /
+  5-node / apply-every-4 run (185 commands submitted, 183 committed on every
+  node) plus 12 seeds x 300 steps with applies.
+
+The runtime's refcount + cycle-collector discipline holds for these allocation
+patterns. Re-checked after every milestone.
