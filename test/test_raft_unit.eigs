@@ -1,0 +1,57 @@
+# Hand-driven unit tests for the pure state machine (no scheduler/cluster yet).
+# Routes messages manually through handle_event to exercise leader election.
+load_file of "src/raft.eigs"
+
+fails is 0
+define check(cond, label) as:
+    if cond:
+        print of f"  ok: {label}"
+    else:
+        print of f"  FAIL: {label}"
+        fails is fails + 1
+
+# ---- single-node cluster elects itself ----
+print of "single-node election:"
+r1 is new_raft of {"id": "1", "cluster": ["1"], "election_timeout_tick": 3}
+check of [r1.role == "follower", "starts as follower"]
+handle_event of [r1, {"kind": "tick"}]
+handle_event of [r1, {"kind": "tick"}]
+check of [r1.role == "follower", "still follower before timeout"]
+handle_event of [r1, {"kind": "tick"}]
+check of [r1.role == "leader", "becomes leader at timeout (quorum=1)"]
+check of [r1.current_term == 2, "term advanced to 2"]
+
+# ---- three-node election, messages routed by hand ----
+print of "three-node election:"
+nodes is {}
+for id in ["1", "2", "3"]:
+    nodes[id] is new_raft of {"id": id, "cluster": ["1", "2", "3"], "election_timeout_tick": 3}
+
+# Drive node 1 to time out and start an election.
+out is []
+for t in range of 3:
+    u is handle_event of [nodes["1"], {"kind": "tick"}]
+    out is u.outgoing
+check of [nodes["1"].role == "candidate", "node 1 is candidate after timeout"]
+check of [(len of out) == 2, "node 1 sent 2 RequestVote messages"]
+
+# Deliver each RequestVote; collect the vote responses.
+responses is []
+for msg in out:
+    u is handle_event of [nodes[msg.to], msg]
+    for m in u.outgoing:
+        append of [responses, m]
+check of [(len of responses) == 2, "two vote responses produced"]
+
+# Deliver the first response back to node 1 — that's the second vote (with its
+# own), reaching quorum (2 of 3), so it should win.
+u is handle_event of [nodes["1"], responses[0]]
+check of [nodes["1"].role == "leader", "node 1 wins election with a majority"]
+check of [nodes["1"].current_term == 2, "leader term is 2"]
+hb is u.outgoing
+check of [(len of hb) == 2, "new leader sends heartbeats to both followers"]
+
+if fails == 0:
+    print of "raft unit: all passed"
+else:
+    print of f"raft unit: {fails} FAILED"

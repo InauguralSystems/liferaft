@@ -1,0 +1,50 @@
+# Deterministic seeded PRNG for the liferaft DST.
+#
+# The ENTIRE simulation's randomness flows through one of these, passed
+# explicitly. It touches no nondeterministic builtin (no `random`, no clock)
+# and no bitwise ops, so the sequence is byte-identical on every run and
+# every platform for a given seed.
+#
+# Algorithm: a 32-bit linear congruential generator (Numerical Recipes
+# constants), computed in pure IEEE-754 double arithmetic. Determinism rests
+# on a*state + c staying exactly representable: with a = 1664525 and the
+# largest state 4294967295, a*state ~= 7.15e15, which is < 2^53 (9.007e15),
+# so the multiply, add, and modulo are all exact integer operations on
+# doubles. (LCG low bits are weak; every consumer below draws from the HIGH
+# bits, which is where an LCG's quality lives. Good enough for a chaos driver,
+# and fully reproducible, which is the property that matters here.)
+#
+# The generator state is carried in a one-element list `[state]` so it can be
+# passed by reference and advanced in place — EigenScript lists are reference
+# types, so `prng_u32 of rng` mutates the caller's holder. This keeps "one
+# PRNG, passed explicitly" without threading (state, value) pairs everywhere.
+
+PRNG_M is 4294967296   # 2^32
+PRNG_A is 1664525
+PRNG_C is 1013904223
+
+# prng_new(seed) -> rng holder [state], seed normalized into [0, 2^32)
+define prng_new(seed) as:
+    s is seed % PRNG_M
+    if s < 0:
+        s is s + PRNG_M
+    return [s]
+
+# Advance the generator in place; return the next raw value in [0, 2^32).
+define prng_u32(rng) as:
+    next is (PRNG_A * rng[0] + PRNG_C) % PRNG_M
+    rng[0] is next
+    return next
+
+# Integer in [0, n), drawn from the high bits. n must be >= 1.
+define prng_int(rng, n) as:
+    u is prng_u32 of rng
+    return floor of ((u / PRNG_M) * n)
+
+# Integer in [lo, hi] inclusive.
+define prng_range(rng, lo, hi) as:
+    return lo + (prng_int of [rng, hi - lo + 1])
+
+# True with probability 1/n (n >= 1): prng_chance(rng, 50) ~ "1 in 50".
+define prng_chance(rng, n) as:
+    return (prng_int of [rng, n]) == 0

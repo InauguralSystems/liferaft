@@ -1,0 +1,351 @@
+# The Raft consensus state machine, ported from codekitchen/liferaft raft.go.
+#
+# This is a PURE state machine: handle_event(raft, event) -> updates. No I/O,
+# no timers, no wall-clock, no nondeterministic iteration. Every collection it
+# walks (members, log) is an ordered list, so its behavior is a deterministic
+# function of (state, event) alone — the property the whole DST rests on.
+#
+# Faithfulness notes (do not "fix" these — they mirror the Go reference):
+#   - Logs are 0-BASED. committed_length / applied_length are LENGTHS, not
+#     indices. matchIndex initializes to -1, nextIndex to 0 (bugs_found.md #4).
+#   - Go's tagged-union Event/RPC types become dicts with a "kind" field.
+#   - NoNode is the empty string ""; NoEntry is {term: 0, index: -1}.
+#
+# Representation:
+#   raft   = {id, current_term, log, committed_length, applied_length,
+#             members, self_member, role, leader_id,
+#             heart_beat_tick, election_timeout_tick, ticks}
+#   member = {id, next_index, match_index, voted_for}
+#   entry  = {term, cmd, client_id}        (cmd is a string)
+#   einfo  = {term, index}                 (EntryInfo)
+#   event  = {kind: "tick"}
+#          | {kind: "message", from, to, term, rpc}
+#          | {kind: "apply", cmd, client_id}
+#   rpc    = {kind: "request_vote", last_log_entry}
+#          | {kind: "request_vote_response", vote_granted}
+#          | {kind: "append_entries", prev_log_entry, entries, leader_committed_length}
+#          | {kind: "append_entries_response", success, last_index_applied, sent_entries}
+#          | {kind: "relay_apply", apply}
+#   updates = {persist: <state>|null, apply: [<apply_result>], outgoing: [<message>]}
+
+# ---- small constructors -------------------------------------------------
+
+define no_entry as:
+    return {"term": 0, "index": -1}
+
+# EntryInfo.GTE: e1 >= e2 iff index >= and term >= (matches Go EntryInfo.GTE)
+define einfo_gte(e1, e2) as:
+    return (e1.index >= e2.index) and (e1.term >= e2.term)
+
+define make_message(from, to, term, rpc) as:
+    return {"kind": "message", "from": from, "to": to, "term": term, "rpc": rpc}
+
+define quorum_size_n(n) as:
+    return (floor of (n / 2)) + 1
+
+# ---- construction -------------------------------------------------------
+
+# config = {id, cluster: [id...], heart_beat_tick?, election_timeout_tick?,
+#           restore_state?: {current_term, log, voted_for}}
+define new_raft(config) as:
+    members is []
+    self_member is null
+    for cid in config.cluster:
+        m is {"id": cid, "next_index": 0, "match_index": -1, "voted_for": ""}
+        append of [members, m]
+        if cid == config.id:
+            self_member is m
+
+    hbt is 1
+    if has_key of [config, "heart_beat_tick"] and config.heart_beat_tick > 0:
+        hbt is config.heart_beat_tick
+    ett is 10
+    if has_key of [config, "election_timeout_tick"] and config.election_timeout_tick > 0:
+        ett is config.election_timeout_tick
+
+    raft is {"id": config.id, "current_term": 1, "log": [],
+             "committed_length": 0, "applied_length": 0,
+             "members": members, "self_member": self_member,
+             "role": "follower", "leader_id": "",
+             "heart_beat_tick": hbt, "election_timeout_tick": ett, "ticks": 0}
+
+    if has_key of [config, "restore_state"] and config.restore_state != null:
+        restore_from_state of [raft, config.restore_state]
+    return raft
+
+define restore_from_state(raft, state) as:
+    raft.current_term is state.current_term
+    raft.log is state.log
+    raft.self_member.voted_for is state.voted_for
+
+define is_leader(raft) as:
+    return raft.role == "leader"
+
+# ---- member helpers -----------------------------------------------------
+
+define raft_member(raft, id) as:
+    for m in raft.members:
+        if m.id == id:
+            return m
+    return null
+
+define vote_count(raft, for_node) as:
+    count is 0
+    for m in raft.members:
+        if m.voted_for == for_node:
+            count is count + 1
+    return count
+
+define quorum_size(raft) as:
+    return quorum_size_n of (len of raft.members)
+
+define log_status(raft) as:
+    if (len of raft.log) == 0:
+        return no_entry of null
+    last is raft.log[(len of raft.log) - 1]
+    return {"term": last.term, "index": (len of raft.log) - 1}
+
+define committed_log(raft) as:
+    return raft.log[0 : raft.committed_length]
+
+# ---- term / election ----------------------------------------------------
+
+define update_term(raft, term) as:
+    raft.current_term is term
+    raft.leader_id is ""
+    for m in raft.members:
+        m.voted_for is ""
+
+define win_election(raft) as:
+    raft.role is "leader"
+    for m in raft.members:
+        m.next_index is len of raft.log
+        m.match_index is -1
+
+define got_vote(raft, from) as:
+    voter is raft_member of [raft, from]
+    voter.voted_for is raft.id
+    me_count is vote_count of [raft, raft.id]
+    if me_count >= (quorum_size of raft):
+        win_election of raft
+        return send_heartbeat of raft
+    return []
+
+define send_to_all_but_self(raft, rpc) as:
+    ms is []
+    for m in raft.members:
+        if m != raft.self_member:
+            append of [ms, make_message of [raft.id, m.id, raft.current_term, rpc]]
+    return ms
+
+define start_election(raft) as:
+    raft.role is "candidate"
+    update_term of [raft, raft.current_term + 1]
+    raft.ticks is 0
+    ms is got_vote of [raft, raft.id]   # got our own vote!
+    rv is {"kind": "request_vote", "last_log_entry": log_status of raft}
+    for msg in send_to_all_but_self of [raft, rv]:
+        append of [ms, msg]
+    return ms
+
+# ---- heartbeat / append-entries (leader side) ---------------------------
+
+define send_heartbeat(raft) as:
+    raft.ticks is 0
+    ms is []
+    for n in raft.members:
+        if n.id != raft.id:
+            entries is raft.log[n.next_index : len of raft.log]
+            prev_entry is no_entry of null
+            prev_index is n.next_index - 1
+            if prev_index >= 0:
+                prev_entry is {"term": raft.log[prev_index].term, "index": prev_index}
+            rpc is {"kind": "append_entries", "prev_log_entry": prev_entry,
+                    "entries": entries, "leader_committed_length": raft.committed_length}
+            append of [ms, make_message of [raft.id, n.id, raft.current_term, rpc]]
+    return ms
+
+define relay_apply_to_leader(raft, apply) as:
+    rpc is {"kind": "relay_apply", "apply": apply}
+    return [make_message of [raft.id, raft.leader_id, raft.current_term, rpc]]
+
+# ---- RPC handlers -------------------------------------------------------
+
+define handle_request_vote(raft, msg, req) as:
+    res is {"kind": "request_vote_response", "vote_granted": 0}
+    out is [make_message of [raft.id, msg.from, raft.current_term, res]]
+    # If votedFor is null or candidateId, and candidate's log is at least
+    # as up-to-date as ours, grant the vote (Raft 5.2, 5.4).
+    if raft.self_member.voted_for == "" or raft.self_member.voted_for == msg.from:
+        my_last is log_status of raft
+        if einfo_gte of [req.last_log_entry, my_last]:
+            res.vote_granted is 1
+            raft.ticks is 0
+            raft.self_member.voted_for is msg.from
+    return out
+
+define handle_request_vote_response(raft, msg, req) as:
+    if raft.role != "candidate":
+        return []
+    if req.vote_granted:
+        return got_vote of [raft, msg.from]
+    return []
+
+define has_matching_log_entry(raft, entry) as:
+    if entry.index == -1 and entry.term == 0:    # NoEntry
+        return 1
+    if entry.index >= (len of raft.log):
+        return 0
+    return raft.log[entry.index].term == entry.term
+
+define handle_append_entries(raft, msg, req) as:
+    res is {"kind": "append_entries_response", "success": 0,
+            "last_index_applied": 0, "sent_entries": 0}
+    out is [make_message of [raft.id, msg.from, raft.current_term, res]]
+
+    if raft.role == "leader":
+        throw of "got appendEntries for term where I am leader!"
+    if raft.role == "candidate":
+        raft.role is "follower"
+    raft.ticks is 0
+    raft.leader_id is msg.from
+
+    if not (has_matching_log_entry of [raft, req.prev_log_entry]):
+        return out
+
+    # If an existing entry conflicts with a new one (same index, different
+    # term), delete it and everything after it (Raft 5.3).
+    i is 0
+    for e in req.entries:
+        existing_idx is req.prev_log_entry.index + 1 + i
+        if existing_idx >= (len of raft.log):
+            break
+        if raft.log[existing_idx].term != e.term:
+            raft.log is raft.log[0 : existing_idx]
+            break
+        i is i + 1
+
+    # Append any new entries not already present.
+    raft.log is append_new_entries of [raft.log, req.prev_log_entry.index + 1, req.entries]
+
+    # Drop trailing entries left over from a previous term.
+    leader_len is req.prev_log_entry.index + 1 + (len of req.entries)
+    if (len of req.entries) > 0 and leader_len < (len of raft.log):
+        if raft.log[leader_len].term < req.entries[(len of req.entries) - 1].term:
+            raft.log is raft.log[0 : leader_len]
+
+    raft.self_member.match_index is (len of raft.log) - 1
+
+    if req.leader_committed_length > raft.committed_length:
+        raft.committed_length is min of [req.leader_committed_length, len of raft.log]
+
+    if (len of req.entries) > 0:
+        res.sent_entries is 1
+        res.last_index_applied is (len of raft.log) - 1
+    res.success is 1
+    return out
+
+define append_new_entries(log, first_new_idx, new_entries) as:
+    already_have is (len of log) - first_new_idx
+    if already_have < (len of new_entries):
+        i is already_have
+        loop while i < (len of new_entries):
+            append of [log, new_entries[i]]
+            i is i + 1
+    return log
+
+define handle_append_entries_response(raft, msg, req) as:
+    m is raft_member of [raft, msg.from]
+    if req.success:
+        if req.sent_entries:
+            m.match_index is req.last_index_applied
+            m.next_index is req.last_index_applied + 1
+    else:
+        m.next_index is max of [0, m.next_index - 1]
+    check_for_commits of raft
+    return []
+
+define check_for_commits(raft) as:
+    # Find the largest N > committed_length-1 such that a majority of members
+    # have match_index >= N and log[N].term == current_term; commit through N.
+    n is (len of raft.log) - 1
+    loop while n > raft.committed_length - 1:
+        entry is raft.log[n]
+        if entry.term != raft.current_term:
+            break
+        count is 0
+        for m in raft.members:
+            if m == raft.self_member or m.match_index >= n:
+                count is count + 1
+        if count >= (quorum_size of raft):
+            raft.committed_length is n + 1
+            break
+        n is n - 1
+
+# ---- the event entry point ---------------------------------------------
+
+define handle_event(raft, event) as:
+    updates is {"persist": null, "apply": [], "outgoing": []}
+    ms is []
+
+    match event.kind:
+        case "tick":
+            raft.ticks is raft.ticks + 1
+            if raft.role == "leader" and raft.ticks >= raft.heart_beat_tick:
+                ms is send_heartbeat of raft
+            elif raft.ticks >= raft.election_timeout_tick:
+                ms is start_election of raft
+
+        case "message":
+            # Stale term: reject (Raft 5.1).
+            if event.term < raft.current_term:
+                ms is []
+            else:
+                # Higher term: step down to follower before responding.
+                if event.term > raft.current_term:
+                    update_term of [raft, event.term]
+                    raft.role is "follower"
+
+                rpc is event.rpc
+                match rpc.kind:
+                    case "request_vote":
+                        ms is handle_request_vote of [raft, event, rpc]
+                    case "request_vote_response":
+                        ms is handle_request_vote_response of [raft, event, rpc]
+                    case "append_entries":
+                        ms is handle_append_entries of [raft, event, rpc]
+                    case "append_entries_response":
+                        ms is handle_append_entries_response of [raft, event, rpc]
+                    case "relay_apply":
+                        if raft.role == "leader":
+                            append of [raft.log, {"term": raft.current_term,
+                                                  "cmd": rpc.apply.cmd,
+                                                  "client_id": rpc.apply.client_id}]
+                            ms is send_heartbeat of raft
+                        # if not leader anymore, drop it; client retries on timeout
+
+                # Must persist state before responding to an RPC.
+                updates.persist is {"current_term": raft.current_term,
+                                    "log": raft.log,
+                                    "voted_for": raft.self_member.voted_for}
+
+        case "apply":
+            if raft.role == "leader":
+                append of [raft.log, {"term": raft.current_term,
+                                      "cmd": event.cmd, "client_id": event.client_id}]
+                ms is send_heartbeat of raft
+            elif raft.leader_id == "":
+                append of [updates.apply, {"cmd": null, "err": "no leader node available",
+                                           "client_id": event.client_id}]
+            else:
+                ms is relay_apply_to_leader of [raft, event]
+
+    # If committed has advanced past applied, emit apply results (Raft 5.3).
+    if raft.applied_length < raft.committed_length:
+        for e in raft.log[raft.applied_length : raft.committed_length]:
+            append of [updates.apply, {"cmd": e.cmd, "err": null, "client_id": e.client_id}]
+        raft.applied_length is raft.committed_length
+
+    for m in ms:
+        append of [updates.outgoing, m]
+    return updates

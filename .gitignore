@@ -1,0 +1,7 @@
+# Local dev symlink to a built eigenscript binary (see README)
+eigs
+# Recorded trace tapes from determinism checks
+*.tape
+# Scratch output
+/tmp_out/
+*.out

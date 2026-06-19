@@ -1,0 +1,45 @@
+# PRNG determinism + range self-test. Run from the repo root.
+load_file of "src/prng.eigs"
+
+rng is prng_new of 42
+
+# Raw sequence (high-bit-derived consumers below depend on this being stable).
+seq is []
+for i in range of 8:
+    append of [seq, prng_u32 of rng]
+print of seq
+
+# prng_int stays in [0, n)
+rng2 is prng_new of 12345
+ok_int is 1
+for i in range of 1000:
+    v is prng_int of [rng2, 7]
+    if v < 0:
+        ok_int is 0
+    if v > 6:
+        ok_int is 0
+print of f"int_in_range={ok_int}"
+
+# prng_range stays in [lo, hi] inclusive and hits both ends over enough draws
+rng3 is prng_new of 999
+lo_seen is 0
+hi_seen is 0
+ok_range is 1
+for i in range of 5000:
+    v is prng_range of [rng3, 2, 7]
+    if v < 2:
+        ok_range is 0
+    if v > 7:
+        ok_range is 0
+    if v == 2:
+        lo_seen is 1
+    if v == 7:
+        hi_seen is 1
+print of f"range_ok={ok_range} lo_seen={lo_seen} hi_seen={hi_seen}"
+
+# Same seed must reproduce the same first value.
+a is prng_new of 7
+b is prng_new of 7
+print of f"reproducible={(prng_u32 of a) == (prng_u32 of b)}"
+
+print of "prng: all passed"
