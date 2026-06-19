@@ -1,0 +1,43 @@
+# Milestone 2 integration: log replication. 3 nodes, no adversary, client
+# applies injected from the PRNG. Check all seven invariants AND applied-stream
+# safety after every step, and confirm commands actually replicate to every
+# node (min committed across nodes advances).
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/scheduler.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+
+seed is 3
+steps is 300
+cluster is cluster_new of [3, prng_new of seed, 5]   # apply every ~5 ticks
+
+violation is null
+viol_step is -1
+step is 0
+loop while step < steps and violation == null:
+    step is step + 1
+    cluster_step of cluster
+    v is check_invariants of cluster
+    if v != null:
+        violation is v
+        viol_step is step
+    av is cluster_applied_consistent of cluster
+    if violation == null and av != null:
+        violation is av
+        viol_step is step
+
+mincommit is cluster_min_committed of cluster
+maxcommit is cluster_max_committed of cluster
+submitted is cluster.cmd_counter
+
+if violation != null:
+    print of f"m2 VIOLATION seed={seed} step={viol_step}: {violation}"
+else:
+    print of f"seed={seed} steps={steps} submitted={submitted} committed={mincommit}/{maxcommit} invariants=clean applied=consistent"
+
+# Replication actually happened: at least 5 commands committed on EVERY node.
+if violation == null and mincommit >= 5:
+    print of "m2: all passed"
+else:
+    print of "m2: FAILED"

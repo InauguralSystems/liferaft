@@ -23,6 +23,7 @@ load_file of "src/cluster.eigs"
 seed is 1
 steps is 100
 nodes is 3
+apply_period is 8   # M2: inject a client command with prob 1/8 each step; 0 = none
 quiet is 0
 
 argv is args of null
@@ -38,6 +39,9 @@ loop while i < (len of argv):
     elif a == "--nodes":
         nodes is num of argv[i + 1]
         i is i + 2
+    elif a == "--apply-period":
+        apply_period is num of argv[i + 1]
+        i is i + 2
     elif a == "--replay":
         i is i + 2
     elif a == "--quiet":
@@ -47,7 +51,7 @@ loop while i < (len of argv):
         i is i + 1
 
 # ---- run ----
-cluster is cluster_new of [nodes, prng_new of seed]
+cluster is cluster_new of [nodes, prng_new of seed, apply_period]
 max_term is 1
 
 step is 0
@@ -58,6 +62,10 @@ loop while step < steps:
     if v != null:
         print of f"VIOLATION seed={seed} step={step}: {v}"
         exit of 1
+    av is cluster_applied_consistent of cluster
+    if av != null:
+        print of f"VIOLATION seed={seed} step={step}: {av}"
+        exit of 1
     for id in cluster.ids:
         t is cluster.rafts[id].current_term
         if t > max_term:
@@ -65,8 +73,10 @@ loop while step < steps:
     if not quiet:
         leaders is cluster_leaders of cluster
         terms is [cluster.rafts[id].current_term for id in cluster.ids]
-        commit is cluster_max_committed of cluster
-        print of f"step={step} leaders={leaders} terms={terms} commit={commit}"
+        mincommit is cluster_min_committed of cluster
+        maxcommit is cluster_max_committed of cluster
+        print of f"step={step} leaders={leaders} terms={terms} commit={mincommit}/{maxcommit}"
 
 final_leaders is cluster_leaders of cluster
-print of f"OK seed={seed} nodes={nodes} steps={steps} leaders={final_leaders} max_term={max_term}"
+applied_total is cluster_max_committed of cluster
+print of f"OK seed={seed} nodes={nodes} steps={steps} leaders={final_leaders} max_term={max_term} committed={cluster_min_committed of cluster}/{applied_total} submitted={cluster.cmd_counter}"

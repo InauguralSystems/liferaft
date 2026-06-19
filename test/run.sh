@@ -19,6 +19,7 @@ unit "prng determinism"      test/test_prng.eigs      "prng: all passed"
 unit "scheduler heap"        test/test_scheduler.eigs "scheduler: all passed"
 unit "raft state machine"    test/test_raft_unit.eigs "raft unit: all passed"
 unit "m1 integration"        test/test_m1.eigs        "m1: all passed"
+unit "m2 log replication"    test/test_m2.eigs        "m2: all passed"
 
 echo "--- determinism (same seed, two fresh processes) ---"
 det_ok=1
