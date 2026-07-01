@@ -14,7 +14,7 @@ jobs:
     name: suite (in devcontainer)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Build the devcontainer (EigenScript pinned by .devcontainer/Dockerfile's
       # EIGS_REF) and run the full suite inside it — the same image a Codespace
