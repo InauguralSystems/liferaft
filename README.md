@@ -1,5 +1,10 @@
 # liferaft (EigenScript)
 
+[![CI](https://github.com/InauguralSystems/liferaft/actions/workflows/tests.yml/badge.svg)](https://github.com/InauguralSystems/liferaft/actions/workflows/tests.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/InauguralSystems/liferaft/badge)](https://securityscorecards.dev/viewer/?uri=github.com/InauguralSystems/liferaft)
+[![tag](https://img.shields.io/github/v/tag/InauguralSystems/liferaft?label=version)](https://github.com/InauguralSystems/liferaft/tags)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A deterministic simulation tester (DST) for the Raft consensus protocol,
 written in [EigenScript](https://github.com/InauguralSystems/EigenScript) and
 ported from the Go project [`codekitchen/liferaft`](https://github.com/codekitchen/liferaft).
@@ -34,10 +39,10 @@ nondeterminism, is a candidate EigenScript bug — logged in
 |------|------|
 | `src/prng.eigs` | seeded PRNG (the one source of randomness) |
 | `src/raft.eigs` | the pure Raft state machine — `handle_event(raft, event) → updates` |
-| `src/scheduler.eigs` | deterministic discrete-event scheduler (priority queue) *(WIP)* |
-| `src/invariants.eigs` | the seven TLA+-derived invariants *(WIP)* |
-| `src/cluster.eigs` | in-memory cluster + network adversary *(WIP)* |
-| `liferaft.eigs` | CLI runner *(WIP)* |
+| `src/scheduler.eigs` | deterministic discrete-event scheduler (priority queue) |
+| `src/invariants.eigs` | the seven TLA+-derived invariants |
+| `src/cluster.eigs` | in-memory cluster + network adversary |
+| `liferaft.eigs` | CLI runner |
 | `test/` | unit + determinism + replay tests |
 | `FINDINGS.md` | every runtime bug / nondeterminism / perf cliff this port exposed |
 
@@ -52,7 +57,7 @@ ln -sf /path/to/EigenScript/src/eigenscript ./eigs
 ./eigs test/test_raft_unit.eigs   # state-machine election unit tests
 ```
 
-The CLI (once complete): `eigenscript liferaft.eigs --seed N --steps M [--replay tape]`.
+The CLI: `eigenscript liferaft.eigs --seed N --steps M [--replay tape]`.
 
 ## Status
 
