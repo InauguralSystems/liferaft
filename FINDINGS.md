@@ -98,7 +98,14 @@ porting. The port's only collision was `prev`.
 
 ---
 
-## F3 — `exit of N` ignores N and always exits 1 — OPEN (minor)
+## F3 — `exit of N` ignores N and always exits 1 — FIXED (verified 2026-07-03)
+
+Re-verified against EigenScript main: `exit of 3` exits with code 3 and
+`exit of 0` exits 0 — the exit builtin now routes the code through
+teardown (upstream carries a dedicated `test_exit.sh` gate: code +
+uncatchable + leak-clean). Original report kept below for the record.
+
+### Original report (stale)
 
 `exit of 3` halts execution (correctly) but the process exit code is **1**, not
 3 — the argument is ignored. Repro: `print of "before"`; `exit of 3` →
