@@ -41,7 +41,8 @@ nondeterminism, is a candidate EigenScript bug — logged in
 | `src/raft.eigs` | the pure Raft state machine — `handle_event(raft, event) → updates` |
 | `src/scheduler.eigs` | deterministic discrete-event scheduler (priority queue) |
 | `src/invariants.eigs` | the seven TLA+-derived invariants |
-| `src/cluster.eigs` | in-memory cluster + network adversary |
+| `src/adversary.eigs` | seeded network adversary (latency/drop/dup/crash/reorder) |
+| `src/cluster.eigs` | in-memory cluster harness |
 | `liferaft.eigs` | CLI runner |
 | `test/` | unit + determinism + replay tests |
 | `FINDINGS.md` | every runtime bug / nondeterminism / perf cliff this port exposed |
