@@ -1,3 +1,4 @@
+# lint: loaded-by ../liferaft.eigs -- module fragment: the entry point composes src/ (#460)
 # Network adversary model. Every decision is a draw from the one seeded PRNG,
 # so the entire adversarial run reproduces from the seed. The harness
 # (cluster.eigs) must call these in a fixed order per message / per step — that

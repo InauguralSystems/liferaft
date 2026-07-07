@@ -1,3 +1,4 @@
+# lint: loaded-by ../liferaft.eigs -- module fragment: the entry point composes src/ (#460)
 # The seven TLA+-derived Raft invariants, ported from invariants.go.
 #
 # These are the correctness ORACLE — ported faithfully, NOT simplified. Each

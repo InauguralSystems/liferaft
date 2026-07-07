@@ -1,3 +1,4 @@
+# lint: loaded-by ../liferaft.eigs -- module fragment: the entry point composes src/ (#460)
 # In-memory cluster harness, driven by the deterministic scheduler.
 #
 # Ported in spirit from inmemory.go, but the Go channel/goroutine machinery is
