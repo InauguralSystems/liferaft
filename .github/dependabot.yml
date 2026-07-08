@@ -4,3 +4,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Group all Action bumps into ONE PR. github/codeql-action is a monorepo
+    # whose sub-actions must move in lockstep (workflows pin them to one SHA and
+    # codeql-action rejects an init/analyze version mismatch); ungrouped, each
+    # sub-action got its own PR and skewed CI. A single grouped PR keeps them in
+    # sync. (Propagated from InauguralSystems/EigenScript#485.)
+    groups:
+      github-actions:
+        patterns:
+          - "*"
