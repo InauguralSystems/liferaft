@@ -22,7 +22,7 @@ RUN apt-get update \
 
 # Build + install EigenScript at the pinned tag onto /usr/local (binary on
 # PATH, stdlib at /usr/local/lib/eigenscript — found relative to the binary).
-ARG EIGS_REF=v0.27.0
+ARG EIGS_REF=v0.28.0
 RUN git clone --depth 1 --branch "${EIGS_REF}" \
         https://github.com/InauguralSystems/EigenScript.git /tmp/eigs \
  && make -C /tmp/eigs install PREFIX=/usr/local CC=gcc \
