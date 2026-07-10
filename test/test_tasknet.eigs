@@ -1,0 +1,62 @@
+# Unit test for the task-based delivery layer (replaces the deleted min-heap
+# test: the hand-rolled heap is gone — upstream #408 cooperative tasks carry
+# delivery; see src/cluster.eigs's header). Exercises the deliverer-task
+# primitives against stub collector nodes, no Raft involved.
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/adversary.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+
+fails is 0
+define check(cond, label) as:
+    if not cond:
+        fails is fails + 1
+        print of f"FAIL: {label}"
+
+got is []
+define stub_node(tag) as:
+    loop while 1:
+        local key is task_recv of null
+        local m is g_cluster.wire[key]
+        dict_remove of [g_cluster.wire, key]
+        append of [got, f"{tag}:{m.p}"]
+
+# Hand-built minimal cluster: the delivery layer touches tids/pending/wire/seq.
+g_cluster is {"ids": ["a", "b"], "tids": {}, "pending": {"a": {}, "b": {}}, "wire": {}, "seq": 0}
+ta is task_spawn of [stub_node, "a"]
+task_detach of ta
+tb is task_spawn of [stub_node, "b"]
+task_detach of tb
+g_cluster.tids["a"] is ta
+g_cluster.tids["b"] is tb
+
+# 1) latency-0 messages deliver in send order (FIFO ready queue, no seed).
+cl_spawn_deliverer of [g_cluster, {"to": "a", "p": 1}, 0]
+cl_spawn_deliverer of [g_cluster, {"to": "a", "p": 2}, 0]
+task_sleep of 0.5
+check of [(len of got) == 2 and got[0] == "a:1" and got[1] == "a:2", "lat-0 delivers in send order"]
+check of [(len of (keys of (g_cluster.pending["a"]))) == 0, "delivered deliverers deregistered"]
+
+# 2) latency orders across ticks: a lat-2 message lands after a later lat-0.
+cl_spawn_deliverer of [g_cluster, {"to": "b", "p": "slow"}, 2]
+cl_spawn_deliverer of [g_cluster, {"to": "b", "p": "fast"}, 0]
+task_sleep of 3
+check of [got[2] == "b:fast" and got[3] == "b:slow", "latency delays delivery to its tick"]
+
+# 3) crash-drop: killing the pending deliverers loses the in-flight message
+#    (detached kill reaps the task before it ever sends — upstream #530).
+cl_spawn_deliverer of [g_cluster, {"to": "a", "p": "doomed"}, 5]
+pend is g_cluster.pending["a"]
+for k in keys of pend:
+    task_kill of (pend[k])
+    dict_remove of [g_cluster.wire, k]
+g_cluster.pending["a"] is {}
+task_sleep of 6
+check of [(len of got) == 4, "killed pending deliverer never delivers"]
+check of [(len of (keys of (g_cluster.wire))) == 0, "wire is empty after crash-drop"]
+
+if fails == 0:
+    print of "tasknet: all passed"
+else:
+    print of f"tasknet: {fails} FAILED"

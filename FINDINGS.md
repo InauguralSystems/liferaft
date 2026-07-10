@@ -83,6 +83,68 @@ This is the idiomatic form regardless, so the port uses it everywhere.
 
 ---
 
+## F5 — `dict_remove` inflated the dict's hash table exponentially (OOM at ~25 removes) — FIXED (EigenScript PR #531)
+
+**Severity: critical.** Found migrating the sim onto the upstream #408 task
+layer (upstream #523): the harness does one `dict_remove` per delivered
+message on a small pending-message registry, and the process ballooned to
+gigabytes and OOM'd the 4GB dev box within seconds. The re-index rebuild
+after a removal reused the grow path's blind capacity-doubling, so N removes
+grew the table by 2^N. Minimal repro (aborted OOM at ~25 iterations):
+
+```eigenscript
+d is {}
+i is 0
+loop while i < 200:
+    d["k"] is 1
+    dict_remove of [d, "k"]
+    i is i + 1
+```
+
+**Fix:** the rebuild now sizes from the live entry count. Root-caused with
+gdb on the malloc-failure abort under `ulimit -v` (`x_oom ← xcalloc ←
+env_hash_rebuild ← builtin_dict_remove`). Regression-pinned upstream
+(`tests/test_dict.eigs`, 200-cycle churn). liferaft was the first workload
+to ever churn `dict_remove` on a long-lived dict.
+
+## F6 — finished tasks were never reaped: a 255-task LIFETIME cap per process — FIXED (EigenScript #530, PR #532: `task_detach`)
+
+**Severity: high.** Same migration: every task ever spawned held its
+handle-table slot until process exit — even joined ones — so `task_spawn`
+raised `EK_LIMIT` after 255 spawns, ever. A task-per-message design (or any
+BEAM-style task-per-event pattern) dies in seconds. Upstream added
+`task_detach of id` (pthread-detach precedent): detached tasks are reaped at
+finish/kill, an uncaught death still fails the process (#493 preserved via a
+scheduler counter). The sim detaches every node task and deliverer at spawn
+(`src/cluster.eigs`).
+
+## F7 — a task killed while READY poisoned the scheduler's ready queue (silent wakeup drops → spurious deadlock) — FIXED (in EigenScript PR #532)
+
+**Severity: high.** Found by F6's regression test: `task_kill` left the
+victim's stale entry in the fixed 256-slot ready queue; enough of them fill
+it, and `sched_ready_push` silently drops REAL wakeups — the scheduler then
+reports "all tasks are blocked — deadlock" on a live program. liferaft's
+crash teardown kills pending deliverers in bulk, so chaos runs would have
+tripped this in production. Upstream `task_kill` now removes the victim's
+pending queue entry.
+
+## F8 — the JIT compiled task code mid-task via OSR; `jit_helper_call` skips the suspend check — mass task corruption past ~5000 loop iterations — FIXED (EigenScript #533)
+
+**Severity: critical.** With F5 and F6 fixed, chaos runs got far enough for
+node tasks' mailbox loops to cross the JIT's OSR threshold — at which point
+the loop was compiled mid-task (the "task code runs interpreted" ruling was
+enforced only at the fresh-entry gate, not at OSR/thunk entries). Inside
+native code, a blocking `task_recv` goes through `jit_helper_call`, which has
+no suspend check: the recv's placeholder null flowed onward as the received
+message and the leaked suspend flag suspended the task mid-expression later.
+Observed as every node task dying within a few steps of each other (~step
+360), `task_recv` returning null, and node params reading as garbage.
+Shrunk to a 70-line upstream repro; root-caused with a suspend-flag ledger +
+`__builtin_return_address` on the blocking-recv path. Upstream now gates all
+four JIT entry points on the task scheduler; regression-pinned with an
+OSR-threshold-crossing recv loop. liferaft was the first workload to run a
+task loop hot.
+
 ## F2 — `prev` is a reserved word (temporal interrogative), unusable as an identifier — BY-DESIGN
 
 `prev` is the temporal interrogative keyword (`prev of x`), so a variable named

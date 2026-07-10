@@ -15,7 +15,6 @@
 # recorded tape carries zero `N` records.
 load_file of "src/prng.eigs"
 load_file of "src/raft.eigs"
-load_file of "src/scheduler.eigs"
 load_file of "src/adversary.eigs"
 load_file of "src/invariants.eigs"
 load_file of "src/cluster.eigs"
@@ -82,6 +81,13 @@ loop while step < steps:
         t is cluster.rafts[id].current_term
         if t > max_term:
             max_term is t
+    if (step % 100) == 0:
+        for id in cluster.ids:
+            r is cluster.rafts[id]
+            print of f"DBGN step={step} id={id} role={r.role} loglen={len of r.log} commit={r.committed_length}"
+            if r.role == "leader":
+                for m in r.members:
+                    print of f"DBGL step={step} member={m.id} next={m.next_index} match={m.match_index}"
     if not quiet:
         leaders is cluster_leaders of cluster
         terms is [cluster.rafts[id].current_term for id in cluster.ids]

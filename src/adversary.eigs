@@ -10,7 +10,9 @@
 #   drop_n      : drop a message with probability 1/drop_n   (0 = never)
 #   dup_n       : duplicate a message with probability 1/dup_n (0 = never)
 #   crash_n     : crash+restart a node with probability 1/crash_n per step (0 = never)
-#   reorder     : truthy => same-tick delivery order is PRNG-shuffled via the heap tiebreak
+#   reorder     : truthy => same-tick delivery order is shuffled by the runtime's
+#                 seeded task scheduler (cluster_new installs task_sched_seed
+#                 from a PRNG draw; the old per-message heap-tiebreak draw is gone)
 
 define adv_none as:
     return {"max_latency": 0, "drop_n": 0, "dup_n": 0, "crash_n": 0, "reorder": 0}
@@ -28,13 +30,6 @@ define adv_latency(adv, rng) as:
     if adv.max_latency <= 0:
         return 0
     return prng_int of [rng, adv.max_latency + 1]
-
-# Same-tick ordering key: a PRNG draw when reordering is on (shuffles same-tick
-# deliveries reproducibly), else 0 (insertion order via the heap's seq).
-define adv_tie(adv, rng) as:
-    if adv.reorder:
-        return prng_int of [rng, 1000000]
-    return 0
 
 define adv_drop(adv, rng) as:
     return adv.drop_n > 0 and (prng_chance of [rng, adv.drop_n])

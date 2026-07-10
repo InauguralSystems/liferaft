@@ -1,24 +1,73 @@
 # lint: loaded-by ../liferaft.eigs -- module fragment: the entry point composes src/ (#460)
-# In-memory cluster harness, driven by the deterministic scheduler.
+# In-memory cluster harness on the runtime's cooperative task layer.
 #
-# Ported in spirit from inmemory.go, but the Go channel/goroutine machinery is
-# replaced by the single-threaded discrete-event scheduler (src/scheduler.eigs).
-# Milestone 1: NO network adversary — messages deliver same-tick with zero
-# latency, ordered by insertion (the heap's seq tiebreak). The adversary
-# (latency, reorder, duplication, crash/restart), all driven by the one PRNG,
-# is added in a later milestone; its hooks are marked below.
+# The hand-rolled discrete-event heap (the old src/scheduler.eigs) is gone
+# (upstream EigenScript#523): the runtime's own deterministic primitives
+# (v0.28.0, upstream #408) carry the simulation instead —
+#   - each Raft node is a cooperative task with a mailbox (a task_recv loop);
+#   - each in-flight message is a deliverer task: task_sleep of <latency> on
+#     the VIRTUAL clock, then task_send to the target node's CURRENT task, so
+#     delivery time rides the runtime's discrete-event clock;
+#   - payloads DON'T cross task boundaries: spawn args and task_send are
+#     share-nothing (deep copy), and AppendEntries payloads carry log-entry
+#     lists that grow with the run — copying them twice per delivery is a
+#     quadratic bill the old heap (which shared dicts by reference) never
+#     paid. So every event is staged BY REFERENCE in the shared module-global
+#     wire registry (cluster.wire, key = seq) and only the small key string
+#     rides the mailbox; the receiving node pops the payload out of the wire.
+#     A duplicated message is two keys pointing at ONE dict — exactly the old
+#     heap's shared-dup semantics;
+#   - same-instant delivery ORDER is the runtime's ready-queue order. With the
+#     adversary's reorder flag on, cluster_new installs task_sched_seed (seeded
+#     by a draw from the liferaft PRNG, so the whole interleaving stays a pure
+#     function of the run's seed) and the runtime's seeded pick replaces the
+#     old heap's per-message PRNG tiebreak. Seeding is STICKY for the process:
+#     run reorder and non-reorder clusters in separate processes.
+#   - a crash loses in-flight traffic by task_kill: the node task dies with
+#     its mailbox (the socket buffer), and every pending deliverer registered
+#     for that node is killed before it can send. Deliverers deregister
+#     themselves atomically at delivery (send + deregister with no yield
+#     between), so the pending registry never holds a finished task's id.
+#
+# Quiescence pattern: the driver advances in HALF ticks. cluster_step sleeps
+# to the tick boundary + 0.5, performs the step's injections (ticks, client
+# apply, crash) WITHOUT yielding — so, exactly like the old heap harness,
+# nothing delivers until the step's disruption is in place — then sleeps 0.5
+# more. The virtual clock cannot pass an instant while any latency-0 cascade
+# work remains at it, so when cluster_step returns the step has fully settled
+# and the caller checks invariants on a quiescent state. Each step spans
+# exactly 1.0 virtual tick, so a latency-L message sent during step S is
+# delivered during step S+L (L=0: the same step's cascade), matching the old
+# heap's (t + lat) keys.
+#
+# Tasks share the module-global heap, so node and deliverer tasks reach the
+# cluster through the module global g_cluster — ONE live cluster per process
+# at a time. cluster_run tears its cluster down (cluster_end) before the next
+# seed; the sweep is sequential, so that is enough.
 #
 # A cluster is:
-#   {ids:    [id...]              ordered node ids "1".."N"
-#    rafts:  {id -> raft}         the pure state machines
-#    states: {id -> persisted}    last persisted PersistentState (for restore)
-#    sched:  <scheduler>          the global event heap
-#    now:    <tick>               logical clock
-#    rng:    <prng>}              the one source of randomness
+#   {ids:     [id...]             ordered node ids "1".."N"
+#    rafts:   {id -> raft}        the pure state machines
+#    states:  {id -> persisted}   last persisted PersistentState (for restore)
+#    applied: {id -> [cmd...]}    observed applied stream per node
+#    tids:    {id -> task id}     each node's CURRENT task
+#    pending: {id -> {key->tid}}  live deliverer tasks per TARGET node
+#    wire:    {key -> event}      staged payloads, shared by reference
+#    seq:     <counter>           registry key source
+#    now:     <tick>              logical step counter (observation only)
+#    rng:     <prng>              the one source of randomness
+#    adv:     <adversary config>}
+
+g_cluster is null
 
 define cluster_new(num_nodes, rng, apply_period is 0, adv is null) as:
     if adv == null:
         adv is adv_none of null
+    # One seeded-scheduler install per reorder cluster: the runtime's ready
+    # pick becomes the same-tick reorder adversary, derived from this run's
+    # PRNG so two runs of one seed interleave identically.
+    if adv.reorder:
+        task_sched_seed of (prng_int of [rng, 1073741824])
     ids is []
     for i in range of num_nodes:
         append of [ids, str of (i + 1)]
@@ -34,68 +83,122 @@ define cluster_new(num_nodes, rng, apply_period is 0, adv is null) as:
         applied[id] is []
     # apply_period = 0 disables client applies (M1 pure-election mode); > 0 means
     # inject a command with probability 1/apply_period each step (M2+).
-    # adv is the network adversary config (adv_none = M1/M2 reliable network).
-    return {"ids": ids, "rafts": rafts, "states": states, "applied": applied,
-            "sched": sched_new of null, "now": 0, "rng": rng, "adv": adv,
-            "apply_period": apply_period, "cmd_counter": 0}
+    cluster is {"ids": ids, "rafts": rafts, "states": states, "applied": applied,
+                "tids": {}, "pending": {}, "wire": {}, "seq": 0,
+                "now": 0, "rng": rng, "adv": adv,
+                "apply_period": apply_period, "cmd_counter": 0}
+    g_cluster is cluster
+    for id in ids:
+        cluster.pending[id] is {}
+        cluster.tids[id] is cl_spawn_node of id
+    return cluster
+
+# Tear the cluster's tasks down (node tasks block in task_recv forever; the
+# sweep runs many clusters in one process, so each must release its tasks).
+define cluster_end(cluster) as:
+    for id in cluster.ids:
+        task_kill of (cluster.tids[id])
+        local pend is cluster.pending[id]
+        for k in keys of pend:
+            task_kill of (pend[k])
+        cluster.pending[id] is {}
+
+# A node's task body: block on the mailbox, feed each event to the Raft state
+# machine. Runs until task_kill (cl_crash / cluster_end). The id arg is
+# deep-copied at the spawn boundary; the cluster itself is reached through the
+# shared module global.
+define cl_node_task(id) as:
+    loop while 1:
+        local key is task_recv of null
+        if (type of key) != "str":
+            print of f"DBGBAD node={id} step={g_cluster.now} keytype={type of key} key={key}"
+            throw of "node got a non-string mailbox message"
+        local ev is g_cluster.wire[key]
+        dict_remove of [g_cluster.wire, key]
+        cl_deliver of [g_cluster, id, ev]
+
+# Spawn a node task DETACHED (upstream #530): nobody joins nodes — they are
+# task_kill'd at crash/teardown, and detached-kill reaps the handle slot, so
+# a long sweep's respawn churn can't exhaust the 255-slot task table.
+define cl_spawn_node(id) as:
+    local tid is task_spawn of [cl_node_task, id]
+    task_detach of tid
+    return tid
+
+# One in-flight message: sleep its latency on the virtual clock, deliver to
+# the target's CURRENT task, deregister. Send + deregister issue no yield, so
+# a crash can never observe (and kill) a deliverer that already delivered.
+define cl_deliver_task(to, lat, key) as:
+    task_sleep of lat
+    task_send of [(g_cluster.tids[to]), key]
+    dict_remove of [g_cluster.pending[to], key]
+
+# Stage an event on the wire by REFERENCE and return its key. The key (a
+# small string) is what crosses the task boundary; the payload never gets
+# deep-copied.
+define cl_wire_put(cluster, ev) as:
+    cluster.seq is cluster.seq + 1
+    local key is f"{cluster.seq}"
+    local w is cluster.wire
+    w[key] is ev
+    return key
 
 # Persist a copy of a node's state (independent log list; entry dicts are never
-# mutated in place, so sharing them is safe). Used by restore on crash later.
+# mutated in place, so sharing them is safe). Used by restore on crash.
 define cl_persist(cluster, id, persist) as:
-    log_copy is persist.log[0 : len of persist.log]
+    local log_copy is persist.log[0 : len of persist.log]
     cluster.states[id] is {"current_term": persist.current_term,
                            "voted_for": persist.voted_for, "log": log_copy}
 
-# Deliver one scheduled item to its target node and re-schedule any messages
-# the node emits.
-define cl_deliver(cluster, item) as:
-    raft is cluster.rafts[item.to]
-    updates is handle_event of [raft, item.ev]
+# Deliver one event to node `to` and route any messages the node emits.
+define cl_deliver(cluster, to, ev) as:
+    raft is cluster.rafts[to]
+    updates is handle_event of [raft, ev]
     if updates.persist != null:
-        cl_persist of [cluster, item.to, updates.persist]
+        cl_persist of [cluster, to, updates.persist]
     # Record the applied command stream for this node (committed entries that
     # reached the state machine). cmd == null marks a "no leader" rejection, not
     # an applied command, so it's skipped.
     for res in updates.apply:
         if res.cmd != null:
-            append of [cluster.applied[item.to], res.cmd]
+            append of [cluster.applied[to], res.cmd]
     for msg in updates.outgoing:
         cl_schedule_msg of [cluster, msg]
 
-# Schedule one outgoing message through the network adversary. Draw order is
-# fixed (drop, then latency, then tie, then dup) so the PRNG sequence stays a
-# deterministic function of the seed. adv_none makes this zero-latency,
-# in-order, lossless delivery (M1/M2).
+# Route one outgoing message through the network adversary and hand it to a
+# deliverer task. Draw order is fixed per message (drop, latency, dup) so the
+# PRNG consumption per message stays deterministic. Same-tick order is no
+# longer a per-message draw: the seeded runtime scheduler owns it (see header).
 define cl_schedule_msg(cluster, msg) as:
     adv is cluster.adv
     rng is cluster.rng
     if adv_drop of [adv, rng]:
         return    # message lost on the wire; sender retries via heartbeat
     lat is adv_latency of [adv, rng]
-    tie is adv_tie of [adv, rng]
-    sched_push of [cluster.sched, cluster.now + lat, tie, msg.to, msg]
+    cl_spawn_deliverer of [cluster, msg, lat]
     if adv_dup of [adv, rng]:
         lat2 is adv_latency of [adv, rng]
-        tie2 is adv_tie of [adv, rng]
-        sched_push of [cluster.sched, cluster.now + lat2, tie2, msg.to, msg]
+        cl_spawn_deliverer of [cluster, msg, lat2]
 
-# Drain every event due at or before `now` (M1: the whole same-tick cascade).
-define cl_drain(cluster, now) as:
-    s is cluster.sched
-    loop while not (sched_empty of s):
-        top is sched_peek of s
-        if top.t > now:
-            break
-        item is sched_pop of s
-        cl_deliver of [cluster, item]
+define cl_spawn_deliverer(cluster, msg, lat) as:
+    local key is cl_wire_put of [cluster, msg]
+    local tid is task_spawn of [cl_deliver_task, msg.to, lat, key]
+    # Detached from birth (#530): a deliverer is fire-and-forget — reaped at
+    # delivery, or at the crash-teardown kill even if it never got to run.
+    task_detach of tid
+    local pend is cluster.pending[msg.to]
+    pend[key] is tid
 
-# Advance one tick: deliver a Tick to every node, optionally inject a client
-# apply, then drain the cascade.
+# Advance one tick: sleep to the next injection instant, deliver a Tick to
+# every node, optionally inject a client apply and a crash — all without
+# yielding — then sleep to the settle point. On return the step's whole
+# cascade has run and the cluster is quiescent for invariant checks.
 define cluster_step(cluster) as:
+    task_sleep of 0.5
     cluster.now is cluster.now + 1
-    now is cluster.now
+    tick_ev is {"kind": "tick"}
     for id in cluster.ids:
-        sched_push of [cluster.sched, now, 0, id, {"kind": "tick"}]
+        task_send of [(cluster.tids[id]), (cl_wire_put of [cluster, tick_ev])]
     # M2: PRNG-driven client applies to the current leader. The draw happens
     # EVERY step (even with no leader) so PRNG consumption — and therefore the
     # whole run — stays a stable function of the seed (matches the Go reference).
@@ -105,21 +208,26 @@ define cluster_step(cluster) as:
             cmd is f"cmd:{cluster.cmd_counter}"
             for id in cluster.ids:
                 if cluster.rafts[id].role == "leader":
-                    sched_push of [cluster.sched, now, 0, id,
-                                   {"kind": "apply", "cmd": cmd, "client_id": ""}]
-    # M3: crash + restart a random node from its persisted state.
+                    apply_ev is {"kind": "apply", "cmd": cmd, "client_id": ""}
+                    task_send of [(cluster.tids[id]),
+                                  (cl_wire_put of [cluster, apply_ev])]
+    # M3: crash + restart a random node from its persisted state. Happens
+    # before anything delivers (this fn has not yielded yet), exactly like the
+    # old harness's crash-before-drain ordering.
     if adv_crash of [cluster.adv, cluster.rng]:
         idx is prng_int of [cluster.rng, len of cluster.ids]
         cl_crash of [cluster, cluster.ids[idx]]
-    cl_drain of [cluster, now]
+    task_sleep of 0.5
 
 # Crash a node and restart it from persisted state: volatile state (role, ticks,
 # matchIndex, leaderID) resets; persistent state (currentTerm, log, votedFor)
-# survives via cluster.states[id]. In-flight messages to it are dropped (socket
-# buffer lost). A fresh randomized election timeout is drawn on restart (a real
-# node re-randomizes; this also avoids restarted nodes sharing one timeout). If
-# the node never persisted (states[id] == null), it comes back empty — faithful
-# to the reference, since only Message events persist.
+# survives via cluster.states[id]. The node's task dies with its mailbox (the
+# socket buffer is lost) and every pending deliverer to it is killed (in-flight
+# messages are lost); a fresh node task is spawned on the rebuilt state machine.
+# A fresh randomized election timeout is drawn on restart (a real node
+# re-randomizes; this also avoids restarted nodes sharing one timeout). If the
+# node never persisted (states[id] == null), it comes back empty — faithful to
+# the reference, since only Message events persist.
 define cl_crash(cluster, cid) as:
     state is cluster.states[cid]
     ett is 5 + (prng_int of [cluster.rng, 4])
@@ -132,7 +240,17 @@ define cl_crash(cluster, cid) as:
     # conflict against the pre-crash stream. (Raft guarantees the rebuilt prefix
     # matches, so cross-node applied-consistency still holds.)
     cluster.applied[cid] is []
-    sched_drop_to of [cluster.sched, cid]
+    task_kill of (cluster.tids[cid])
+    local pend is cluster.pending[cid]
+    for k in keys of pend:
+        task_kill of (pend[k])
+        dict_remove of [cluster.wire, k]
+    cluster.pending[cid] is {}
+    # Keys already DELIVERED to the dead mailbox leave their wire entries
+    # behind (we can't enumerate a dropped mailbox) — a few dict slots per
+    # crash, reclaimed with the cluster; the messages themselves are lost
+    # with the mailbox, exactly like the old heap's sched_drop_to.
+    cluster.tids[cid] is cl_spawn_node of cid
 
 # Run one seed to completion (or to the first violation). Checks all seven
 # invariants AND applied-stream safety after every step. Returns a result dict;
@@ -143,23 +261,27 @@ define cluster_run(seed, nodes, apply_period, adv, max_steps) as:
     cluster is cluster_new of [nodes, prng_new of seed, apply_period, adv]
     max_term is 1
     step is 0
-    loop while step < max_steps:
+    result is null
+    loop while step < max_steps and result == null:
         step is step + 1
         cluster_step of cluster
         v is check_invariants of cluster
         if v == null:
             v is cluster_applied_consistent of cluster
         if v != null:
-            return {"violated": 1, "seed": seed, "step": step, "msg": v,
-                    "committed": cluster_min_committed of cluster,
-                    "submitted": cluster.cmd_counter, "max_term": max_term}
+            result is {"violated": 1, "seed": seed, "step": step, "msg": v,
+                       "committed": cluster_min_committed of cluster,
+                       "submitted": cluster.cmd_counter, "max_term": max_term}
         for id in cluster.ids:
             t is cluster.rafts[id].current_term
             if t > max_term:
                 max_term is t
-    return {"violated": 0, "seed": seed, "step": max_steps, "msg": null,
-            "committed": cluster_min_committed of cluster,
-            "submitted": cluster.cmd_counter, "max_term": max_term}
+    if result == null:
+        result is {"violated": 0, "seed": seed, "step": max_steps, "msg": null,
+                   "committed": cluster_min_committed of cluster,
+                   "submitted": cluster.cmd_counter, "max_term": max_term}
+    cluster_end of cluster
+    return result
 
 # --- observation helpers -------------------------------------------------
 

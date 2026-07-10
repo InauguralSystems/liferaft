@@ -39,10 +39,9 @@ nondeterminism, is a candidate EigenScript bug — logged in
 |------|------|
 | `src/prng.eigs` | seeded PRNG (the one source of randomness) |
 | `src/raft.eigs` | the pure Raft state machine — `handle_event(raft, event) → updates` |
-| `src/scheduler.eigs` | deterministic discrete-event scheduler (priority queue) |
 | `src/invariants.eigs` | the seven TLA+-derived invariants |
 | `src/adversary.eigs` | seeded network adversary (latency/drop/dup/crash/reorder) |
-| `src/cluster.eigs` | in-memory cluster harness |
+| `src/cluster.eigs` | in-memory cluster harness on the runtime's cooperative task layer (a task per node, a detached deliverer task per in-flight message, virtual-clock latency, seeded-scheduler reorder) |
 | `liferaft.eigs` | CLI runner |
 | `test/` | unit + determinism + replay tests |
 | `FINDINGS.md` | every runtime bug / nondeterminism / perf cliff this port exposed |
@@ -63,9 +62,10 @@ The CLI: `eigenscript liferaft.eigs --seed N --steps M [--replay tape]`.
 ## Status
 
 **Milestones 1–4 complete** — the full DST. Verified by `test/run.sh`:
-- **M1 leader election** — PRNG determinism, scheduler heap, state-machine
-  election unit tests, 3-node integration, same-seed two-process determinism,
-  `EIGS_TRACE`/`EIGS_REPLAY` byte-for-byte (zero nondet builtins).
+- **M1 leader election** — PRNG determinism, the task-based delivery layer,
+  state-machine election unit tests, 3-node integration, same-seed two-process
+  determinism, `EIGS_TRACE`/`EIGS_REPLAY` byte-for-byte (the only tape record
+  is `args`' argv, by upstream contract).
 - **M2 log replication** — client applies, commit propagation, applied-stream
   safety; commands replicate to every node; 50-seed × 200-step invariant sweep.
 - **M3 network adversary** — latency, reordering, duplication, drops, and
