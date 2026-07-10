@@ -4,12 +4,15 @@
 # step despite the chaos, and the cluster must still make real progress.
 load_file of "src/prng.eigs"
 load_file of "src/raft.eigs"
-load_file of "src/scheduler.eigs"
 load_file of "src/adversary.eigs"
 load_file of "src/invariants.eigs"
 load_file of "src/cluster.eigs"
 
-seed is 11
+# seed 42: under the task-layer harness's scheduling universe this seed
+# crashes the leader repeatedly (max_term reaches ~15), exercising the
+# re-election machinery the gate demands. (Seed 11, chosen for the old
+# heap harness's draw sequence, never crashed the leader here.)
+seed is 42
 steps is 1500
 cluster is cluster_new of [5, prng_new of seed, 6, adv_chaos of null]
 

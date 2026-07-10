@@ -21,11 +21,16 @@ if ! diff -q "$first" "$second" >/dev/null; then
   exit 1
 fi
 
+# One N record is EXPECTED: upstream #471 put `args` on the tape (the CLI
+# argv is a nondeterministic input by contract), and liferaft.eigs calls
+# `args of null` exactly once. Anything beyond that single record means a
+# real nondet builtin crept into the sim. (0 tolerates a pre-#471 runtime.)
 nrec="$(grep -c '^N ' "$tape" 2>/dev/null || true)"
-if [ "${nrec:-0}" -ne 0 ]; then
+if [ "${nrec:-0}" -gt 1 ]; then
   echo "replay: FAILED — tape carries $nrec nondeterministic builtin value(s);"
-  echo "         determinism is not purely seed-derived (a nondet builtin crept in)."
+  echo "         only the single argv record (#471) is expected — a nondet"
+  echo "         builtin crept into the sim."
   exit 1
 fi
 
-echo "replay: byte-for-byte identical, tape N-records=0 (determinism is purely seed-derived)"
+echo "replay: byte-for-byte identical, tape N-records=$nrec (argv only; sim determinism is purely seed-derived)"
