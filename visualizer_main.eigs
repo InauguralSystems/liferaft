@@ -1,0 +1,68 @@
+# Entry point for the cluster visualizer (issue #18, slice 3).
+#
+#   eigenscript visualizer_main.eigs --seed N --steps M [--nodes K]
+#                                    [--apply-period P] [--adversary]
+#                                    [--dump]
+#
+# Without --dump: opens the timeline UI (needs the gfx build of a runtime
+# whose lib carries the timeline widget — EigenScript main post-v0.36.0;
+# on the v0.36.0 pin the UI path fails loudly at the timeline call).
+#
+# --dump: run viz_collect and print the record stream in the CLI's exact
+# `VIZ ` line format, nothing else — no ui lib, no gfx, runs on any
+# pinned runtime. test/run.sh diffs this against
+# `liferaft.eigs --viz-events | grep '^VIZ '`: the visualizer's sim run
+# is byte-identical to the headless CLI's, which is what makes the UI a
+# pure reader of the run. Exits 1 on an invariant violation (the records
+# up to the violation still print, mirroring the CLI's viz_dump-on-exit).
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/adversary.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+load_file of "visualizer.eigs"
+
+# ---- parse args (the liferaft.eigs flag set, minus its CLI-only ones) ----
+seed is 1
+steps is 150
+nodes is 3
+apply_period is 8
+adversary is 0
+dump is 0
+
+argv is args of null
+i is 0
+loop while i < (len of argv):
+    a is argv[i]
+    if a == "--seed":
+        seed is num of argv[i + 1]
+        i is i + 2
+    elif a == "--steps":
+        steps is num of argv[i + 1]
+        i is i + 2
+    elif a == "--nodes":
+        nodes is num of argv[i + 1]
+        i is i + 2
+    elif a == "--apply-period":
+        apply_period is num of argv[i + 1]
+        i is i + 2
+    elif a == "--adversary":
+        adversary is 1
+        i is i + 1
+    elif a == "--dump":
+        dump is 1
+        i is i + 1
+    else:
+        i is i + 1
+
+res is viz_collect of [seed, steps, nodes, apply_period, adversary]
+
+if dump:
+    for r in res.records:
+        print of (viz_format of r)
+    if res.violation != null:
+        exit of 1
+else:
+    load_file of "lib/ui.eigs"
+    viz_load of res
+    run of null

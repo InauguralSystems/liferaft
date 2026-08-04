@@ -1,0 +1,210 @@
+# lint: loaded-by visualizer_main.eigs -- module fragment: the entry point loads src/ then this (#460 pattern)
+# Cluster visualizer (issue #18, slice 3) — a run() front-end over the
+# deterministic sim, rendered with lib/ui's timeline lane widget (#842).
+#
+# The visualizer is a PURE READER of the run: viz_collect drives the sim
+# through exactly the calls liferaft.eigs makes (same construction, same
+# per-step invariant checks — the pure reads the CLI also performs), so
+# the record stream it holds is byte-identical to the CLI's --viz-events
+# output for the same seed/flags. That is the oracle in test/run.sh: the
+# UI can never show a run that differs from the headless one.
+#
+# The seed-replay scrubber IS the determinism demo: the record history
+# is the complete run (determinism is seed-derived, so replaying = re-
+# reading), and dragging the ruler scrubs tl.cursor over it — the
+# per-node state panel re-derives role/term/commit at the cursor time
+# from records <= t. on_scrub fires ONLY on the user gesture (the #842
+# contract: programmatic timeline_set_cursor is silent), so replay-
+# driven cursor updates can never feed back into the scrub handler.
+#
+# Conventions (the tester.eigs / eigen-edit shape): this file is
+# LOAD_FILE'd after src/*.eigs; lib/ui.eigs must be loaded before
+# build_ui/run are CALLED (stubs first when headless — test/test_viz_ui);
+# `run` is defined but never called at load time; all mutable UI state
+# lives in the V dict (field writes cross the module boundary, bare
+# rebinds do not — EigenScript#373).
+
+VIZ_W is 960
+VIZ_H is 520
+
+# ---- all mutable visualizer state ----
+V is {
+    "root": null,
+    "tl": null,
+    "status_lb": null,
+    "title_lb": null,
+    "node_lbs": {},
+    "records": [],
+    "ids": [],
+    "run_end": 0,
+    "violation": null,
+    "vstep": 0,
+    "summary": "",
+    "scrub_fires": 0
+}
+
+# Stamp a viz_collect result into V — the one step between collecting
+# and build_ui; the headless test uses the same seam as the entry point.
+define viz_load(res) as:
+    V.records is res.records
+    V.ids is res.ids
+    V.run_end is res.run_end
+    V.violation is res.violation
+    V.vstep is res.vstep
+    V.summary is res.summary
+
+# ---- collect: run the sim exactly as the CLI does, hold the records ----
+# Mirrors liferaft.eigs's run loop call-for-call (cluster_new args, viz
+# enable before the first step, invariant + applied checks every step) so
+# PRNG consumption and task interleaving match the CLI byte-for-byte.
+# Returns {records, run_end, violation, vstep, summary}.
+define viz_collect(seed, steps, nodes, apply_period, adversary) as:
+    local adv is adv_none of null
+    if adversary:
+        adv is adv_chaos of null
+    local cluster is cluster_new of [nodes, prng_new of seed, apply_period, adv]
+    cluster_viz_enable of cluster
+    local violation is null
+    local vstep is 0
+    local step is 0
+    loop while step < steps and violation == null:
+        step is step + 1
+        cluster_step of cluster
+        local v is check_invariants of cluster
+        if v == null:
+            v is cluster_applied_consistent of cluster
+        if v != null:
+            violation is v
+            vstep is step
+    local summary is f"seed={seed} nodes={nodes} steps={step} committed={cluster_min_committed of cluster}/{cluster_max_committed of cluster} submitted={cluster.cmd_counter}"
+    local records is cluster.viz
+    local run_end is cluster.now
+    local ids is cluster.ids
+    cluster_end of cluster
+    return {"records": records, "ids": ids, "run_end": run_end,
+            "violation": violation, "vstep": vstep, "summary": summary}
+
+# The CLI's exact --viz-events line for one record (liferaft.eigs
+# viz_dump) — the byte-level contract the dump oracle diffs against.
+define viz_format(r) as:
+    return f"VIZ t={r.t} node={r.node} kind={r.kind} role={r.role} term={r.term} {r.detail}"
+
+# ---- mapping: records -> timeline lanes/markers/spans ----
+# The consumer mapping from upstream's "Consumer contract 1" test: every
+# record is a marker carrying its source record (read back off
+# tl.hover_item), and role transitions fold into lane spans. Every node
+# starts life a follower at t=0 (new_raft), so spans are seeded there,
+# not at the node's first record.
+define viz_build_timeline(tl, records, ids, run_end) as:
+    for id in ids:
+        timeline_add_lane of [tl, timeline_lane of [id, f"node {id}"]]
+    local role_name is {}
+    local role_start is {}
+    for id in ids:
+        role_name[id] is "follower"
+        role_start[id] is 0
+    for ri in range of (len of records):
+        local rec is records[ri]
+        local m is timeline_marker of [rec.t, rec.node, rec.kind]
+        m.rec is rec
+        timeline_add_marker of [tl, m]
+        if rec.role != role_name[rec.node]:
+            local sp is timeline_span of [role_start[rec.node], rec.t, rec.node, role_name[rec.node]]
+            timeline_add_span of [tl, sp]
+            role_name[rec.node] is rec.role
+            role_start[rec.node] is rec.t
+    for id in ids:
+        if role_start[id] < run_end:
+            timeline_add_span of [tl, timeline_span of [role_start[id], run_end, id, role_name[id]]]
+    # Role kinds keyed to THEME roles (one styling call per kind); event
+    # markers take the tl_kinds palette by kind hash.
+    timeline_style of [tl, "leader", "accent"]
+    timeline_style of [tl, "candidate", "tl_cursor"]
+    timeline_style of [tl, "follower", "text_dim"]
+    timeline_style of [tl, "crash", "focus_ring"]
+
+# ---- replay state at time t, derived purely from records <= t ----
+# {id -> {role, term, last}}: role/term as of the newest record at or
+# before t (every node is a follower at term 1 before its first record),
+# last = the newest event kind. Re-reading the recorded history IS the
+# replay: determinism is seed-derived, so the records are the run.
+define viz_state_at(records, ids, t) as:
+    local st is {}
+    for id in ids:
+        st[id] is {"role": "follower", "term": 1, "last": "-"}
+    for ri in range of (len of records):
+        local rec is records[ri]
+        if rec.t <= t:
+            local s is st[rec.node]
+            s.role is rec.role
+            s.term is rec.term
+            s.last is rec.kind
+    return st
+
+# ---- UI ----
+
+define viz_scrub_update(t) as:
+    local ft is floor of t
+    local st is viz_state_at of [V.records, V.ids, t]
+    for id in V.ids:
+        local s is st[id]
+        local lb is V.node_lbs[id]
+        lb.text is f"node {id}: {s.role}  term {s.term}  last {s.last}"
+    V.status_lb.text is f"t = {ft}   drag ruler = scrub | drag body = pan | wheel = zoom | hover = inspect | Esc quits"
+
+# on_scrub — fires ONLY on the user's ruler gesture (#842 contract).
+# scrub_fires is the headless test's proof of that.
+# lint: allow W002 -- callback signature
+define viz_on_scrub(w, t) as:
+    V.scrub_fires is V.scrub_fires + 1
+    viz_scrub_update of t
+
+# app_loop quits when on_key returns 0 — Escape only, so the pan/zoom
+# keys stay free for future bindings.
+# lint: allow W002 -- callback signature
+define viz_on_key(ev) as:
+    if ev.key == "escape":
+        return 0
+    return 1
+
+# lint: allow W002 -- callback signature
+define viz_on_tick(dt) as:
+    if V.tl.hover_item != null:
+        local hi is V.tl.hover_item
+        if hi.rec != null:
+            local rec is hi.rec
+            V.status_lb.text is f"t={rec.t} node={rec.node} {rec.kind} [{rec.role} term {rec.term}] {rec.detail}"
+
+# Build the widget tree (callable headless; run() adds the window loop).
+# viz_collect must have populated V.records/V.ids/V.run_end first.
+define build_ui(n) as:
+    V.root is panel of ["root", 0, 0, VIZ_W, VIZ_H]
+    V.title_lb is label of ["title", 12, 8, f"liferaft cluster visualizer — {V.summary}"]
+    add_child of [V.root, V.title_lb]
+    V.tl is timeline of ["tl", 10, 30, VIZ_W - 20, VIZ_H - 130]
+    viz_build_timeline of [V.tl, V.records, V.ids, V.run_end]
+    V.tl.on_scrub is viz_on_scrub
+    add_child of [V.root, V.tl]
+    local y is VIZ_H - 92
+    for id in V.ids:
+        local lb is label of [f"n{id}", 12, y, ""]
+        V.node_lbs[id] is lb
+        add_child of [V.root, lb]
+        y is y + 16
+    V.status_lb is label of ["status", 12, VIZ_H - 24, ""]
+    add_child of [V.root, V.status_lb]
+    if V.violation != null:
+        local vlb is label of ["viol", 520, 8, f"VIOLATION at step {V.vstep}: {V.violation}"]
+        add_child of [V.root, vlb]
+    # Start the scrubber at the end of the run — programmatic, so this
+    # must NOT fire on_scrub; the panel is seeded directly.
+    timeline_set_cursor of [V.tl, V.run_end]
+    viz_scrub_update of V.run_end
+    return null
+
+define run(n) as:
+    build_ui of null
+    gfx_open of [VIZ_W, VIZ_H, "liferaft visualizer"]
+    app_loop of [V.root, viz_on_key, viz_on_tick]
+    gfx_close of null
+    return null

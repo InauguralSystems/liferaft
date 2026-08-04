@@ -1,0 +1,189 @@
+# Visualizer UI driven headlessly (issue #18, slice 3) — the upstream
+# tests/test_ui.eigs pattern: gfx stubbed, lib/ui.eigs loaded for real,
+# real event dicts through dispatch. DEV-BINARY ONLY: needs a runtime
+# whose lib carries the timeline widget (EigenScript main post-v0.36.0);
+# test/run.sh probes for it and SKIPs this file on the v0.36.0 pin.
+#
+# What is bound here:
+#   - the mapping (viz_build_timeline): every record -> a marker carrying
+#     its source record; role transitions -> lane spans; bounds = the run
+#   - the scrubber seam: a ruler press + drag through dispatch fires
+#     on_scrub and re-derives the state panel; a PROGRAMMATIC
+#     timeline_set_cursor must NOT fire it (the #842 gesture-only
+#     contract — the replay can never feed back into the scrub handler)
+#   - viz_state_at: replay state re-read from the record history
+
+# ---- gfx stubs (headless) ----
+_ticks is {"v": 0}
+
+define gfx_open(args) as:
+    return 1
+
+define gfx_close(args) as:
+    return null
+
+define gfx_clear(args) as:
+    return null
+
+define gfx_rect(args) as:
+    return null
+
+define gfx_rrect(args) as:
+    return null
+
+define gfx_line(args) as:
+    return null
+
+define gfx_point(args) as:
+    return null
+
+define gfx_circle(args) as:
+    return null
+
+define gfx_text(args) as:
+    return null
+
+define gfx_clip(args) as:
+    return null
+
+define gfx_present(args) as:
+    return null
+
+define gfx_poll(args) as:
+    return null
+
+define gfx_delay(args) as:
+    return null
+
+define gfx_ticks(args) as:
+    _ticks.v is _ticks.v + 1000
+    return _ticks.v
+
+define gfx_text_width(text, scale) as:
+    return (len of text) * 6 * scale
+
+define gfx_text_height(scale) as:
+    return 7 * scale
+
+load_file of "lib/ui.eigs"
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/adversary.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+load_file of "visualizer.eigs"
+
+failures is 0
+
+define check(label, got, want) as:
+    if got == want:
+        print of (label + " OK")
+    else:
+        print of (label + " FAIL")
+        print of "  got:"
+        print of got
+        print of "  want:"
+        print of want
+        failures is failures + 1
+    return 0
+
+# ---- collect a real adversary run and build the UI over it ----
+res is viz_collect of [42, 300, 3, 8, 1]
+check of ["the run is clean", res.violation, null]
+check of ["the run covers every step", res.run_end, 300]
+nrec is len of res.records
+check of ["the run produced records", nrec > 100, 1]
+
+viz_load of res
+build_ui of null
+_layout of [V.root, 0, 0]
+
+# ---- mapping: records -> lanes/markers/spans ----
+check of ["one lane per node", len of V.tl.lanes, 3]
+check of ["every record maps to a marker", len of V.tl.markers, nrec]
+check of ["role transitions map to lane spans", (len of V.tl.spans) >= 3, 1]
+mid is floor of (nrec / 2)
+check of ["the source record rides on its marker", V.tl.markers[mid].rec.kind, res.records[mid].kind]
+tb is timeline_bounds of V.tl
+check of ["the timeline covers the whole run", tb.t1, 300]
+# Spans partition each lane: they are emitted in time order per node and
+# every node's coverage ends at run_end.
+last_end is {}
+span_order_ok is 1
+for si in range of (len of V.tl.spans):
+    s is V.tl.spans[si]
+    if last_end[s.lane] != null:
+        if s.t0 != last_end[s.lane]:
+            span_order_ok is 0
+    else:
+        if s.t0 != 0:
+            span_order_ok is 0
+    last_end[s.lane] is s.t1
+check of ["role spans tile each lane gaplessly from t=0", span_order_ok, 1]
+cover_ok is 1
+for id in res.ids:
+    if last_end[id] != 300:
+        cover_ok is 0
+check of ["every lane's role coverage reaches run_end", cover_ok, 1]
+
+# ---- replay state: derived purely from records <= t ----
+st0 is viz_state_at of [res.records, res.ids, 0]
+all_follow is 1
+for id in res.ids:
+    if st0[id].role != "follower":
+        all_follow is 0
+    if st0[id].term != 1:
+        all_follow is 0
+check of ["before the first record every node is a follower at term 1", all_follow, 1]
+stend is viz_state_at of [res.records, res.ids, 300]
+terms_ok is 1
+for id in res.ids:
+    if stend[id].term < 1:
+        terms_ok is 0
+check of ["end-state terms are sane", terms_ok, 1]
+
+# ---- the scrubber: ruler press + drag through dispatch ----
+# The panel seeds the cursor PROGRAMMATICALLY at run_end in build_ui —
+# that must not have fired on_scrub.
+check of ["programmatic cursor seeding fired no scrub", V.scrub_fires, 0]
+check of ["the cursor starts at run_end", V.tl.cursor, 300]
+
+V.tl._ax is 10
+V.tl._ay is 30
+tv is timeline_view of V.tl
+rx_mid is tv.rx + floor of (tv.rw / 2)
+rx_hi is tv.rx + floor of (tv.rw * 3 / 4)
+dispatch of [V.root, {"type": "mousedown", "button": 1, "x": rx_mid, "y": tv.ry + 2}]
+check of ["a ruler press fires on_scrub", V.scrub_fires, 1]
+cur_mid is V.tl.cursor
+check of ["the press scrubbed to mid-run", (cur_mid > 100) and (cur_mid < 200), 1]
+dispatch of [V.root, {"type": "mousemove", "x": rx_hi, "y": tv.ry + 2}]
+check of ["dragging the ruler keeps scrubbing", V.scrub_fires, 2]
+check of ["the drag moved the cursor forward", V.tl.cursor > cur_mid, 1]
+dispatch of [V.root, {"type": "mouseup", "button": 1, "x": rx_hi, "y": tv.ry + 2}]
+
+# The state panel followed the gesture.
+lb1 is V.node_lbs["1"]
+check of ["the state panel follows the scrub", substr of [lb1.text, 0, 7], "node 1:"]
+panel_matches is 1
+stc is viz_state_at of [res.records, res.ids, V.tl.cursor]
+for id in res.ids:
+    want is f"node {id}: {stc[id].role}  term {stc[id].term}  last {stc[id].last}"
+    if V.node_lbs[id].text != want:
+        panel_matches is 0
+check of ["the panel equals viz_state_at at the cursor", panel_matches, 1]
+
+# Programmatic set after gestures: cursor moves, no callback (#842).
+timeline_set_cursor of [V.tl, 42]
+check of ["timeline_set_cursor is silent", V.scrub_fires, 2]
+check of ["but the cursor moved", V.tl.cursor, 42]
+
+# ---- render smoke with the stubs (no window) ----
+_render_timeline of [V.tl, 10, 30]
+check of ["the timeline renders headless", 1, 1]
+
+print of "---"
+if failures == 0:
+    print of "viz ui: all passed"
+else:
+    print of f"viz ui: {failures} FAILED"

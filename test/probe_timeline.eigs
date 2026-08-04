@@ -1,0 +1,56 @@
+# Capability probe: does this runtime's lib/ui.eigs carry the timeline
+# widget (#842, post-v0.36.0)? Exit 0 = yes. test/run.sh gates the
+# visualizer UI test on this, so the pinned CI binary SKIPs instead of
+# failing — the rung-2 decoupling shape: the UI develops against the dev
+# binary and goes live on pins at the next release cut.
+define gfx_open(args) as:
+    return 1
+
+define gfx_close(args) as:
+    return null
+
+define gfx_clear(args) as:
+    return null
+
+define gfx_rect(args) as:
+    return null
+
+define gfx_rrect(args) as:
+    return null
+
+define gfx_line(args) as:
+    return null
+
+define gfx_point(args) as:
+    return null
+
+define gfx_circle(args) as:
+    return null
+
+define gfx_text(args) as:
+    return null
+
+define gfx_clip(args) as:
+    return null
+
+define gfx_present(args) as:
+    return null
+
+define gfx_poll(args) as:
+    return null
+
+define gfx_delay(args) as:
+    return null
+
+define gfx_ticks(args) as:
+    return 0
+
+define gfx_text_width(text, scale) as:
+    return (len of text) * 6 * scale
+
+define gfx_text_height(scale) as:
+    return 7 * scale
+
+load_file of "lib/ui.eigs"
+tl is timeline of ["probe", 0, 0, 100, 50]
+print of "timeline: present"
