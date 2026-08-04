@@ -57,7 +57,14 @@ ln -sf /path/to/EigenScript/src/eigenscript ./eigs
 ./eigs test/test_raft_unit.eigs   # state-machine election unit tests
 ```
 
-The CLI: `eigenscript liferaft.eigs --seed N --steps M [--replay tape]`.
+The CLI: `eigenscript liferaft.eigs --seed N --steps M [--replay tape]
+[--viz-events]`. `--viz-events` turns on the engine's event-history sink and
+prints one `VIZ t=.. node=.. kind=.. role=.. term=.. ...` line per recorded
+event (elections, votes, appends, commits, sends/drops/dups, crash/restart)
+after the normal output — the data contract for the #18 cluster visualizer.
+The sink is a pure reader: the non-`VIZ` output is byte-identical to a run
+without the flag (gated in `test/run.sh`), and an in-process front-end reads
+the same history off `cluster.viz`.
 
 ## Status
 

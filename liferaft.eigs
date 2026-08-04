@@ -1,6 +1,7 @@
 # liferaft CLI runner.
 #
-#   eigenscript liferaft.eigs --seed N --steps M [--nodes K] [--quiet] [--replay tape]
+#   eigenscript liferaft.eigs --seed N --steps M [--nodes K] [--quiet]
+#                             [--replay tape] [--viz-events]
 #
 # Runs the deterministic simulation for one seed, checks all seven invariants
 # after every step, and prints a per-step trace to stdout (suppress with
@@ -13,6 +14,13 @@
 # the orthogonal language-level tape replay is driven by EIGS_TRACE/EIGS_REPLAY
 # (see test/replay.sh) and, because the sim touches no nondet builtin, a
 # recorded tape carries zero `N` records.
+#
+# --viz-events (issue #18, slice 1): turn on the engine-side event-history
+# sink (cluster.viz) and print the records AFTER the normal run output, one
+# per line, prefixed `VIZ ` — a stable greppable format that is the future
+# visualizer's data contract. The sink is a pure reader: the non-VIZ output
+# of a --viz-events run is byte-identical to the same run without the flag
+# (the pure-reader oracle in test/run.sh).
 load_file of "src/prng.eigs"
 load_file of "src/raft.eigs"
 load_file of "src/adversary.eigs"
@@ -26,6 +34,7 @@ nodes is 3
 apply_period is 8   # M2: inject a client command with prob 1/8 each step; 0 = none
 adversary is 0      # M3: --adversary turns on the chaotic network model
 quiet is 0
+viz_events is 0     # #18 slice 1: record + print the viz event stream
 
 argv is args of null
 i is 0
@@ -55,14 +64,26 @@ loop while i < (len of argv):
     elif a == "--quiet":
         quiet is 1
         i is i + 1
+    elif a == "--viz-events":
+        viz_events is 1
+        i is i + 1
     else:
         i is i + 1
+
+# Print the recorded viz event stream, one record per line. Called only at
+# exit points, AFTER all normal output, so `grep -v '^VIZ '` on a --viz-events
+# run reproduces the plain run byte-for-byte.
+define viz_dump(c) as:
+    for r in c.viz:
+        print of f"VIZ t={r.t} node={r.node} kind={r.kind} role={r.role} term={r.term} {r.detail}"
 
 # ---- run ----
 adv is adv_none of null
 if adversary:
     adv is adv_chaos of null
 cluster is cluster_new of [nodes, prng_new of seed, apply_period, adv]
+if viz_events:
+    cluster_viz_enable of cluster
 max_term is 1
 
 step is 0
@@ -72,10 +93,14 @@ loop while step < steps:
     v is check_invariants of cluster
     if v != null:
         print of f"VIOLATION seed={seed} step={step}: {v}"
+        if viz_events:
+            viz_dump of cluster
         exit of 1
     av is cluster_applied_consistent of cluster
     if av != null:
         print of f"VIOLATION seed={seed} step={step}: {av}"
+        if viz_events:
+            viz_dump of cluster
         exit of 1
     for id in cluster.ids:
         t is cluster.rafts[id].current_term
@@ -98,3 +123,5 @@ loop while step < steps:
 final_leaders is cluster_leaders of cluster
 applied_total is cluster_max_committed of cluster
 print of f"OK seed={seed} nodes={nodes} steps={steps} leaders={final_leaders} max_term={max_term} committed={cluster_min_committed of cluster}/{applied_total} submitted={cluster.cmd_counter}"
+if viz_events:
+    viz_dump of cluster

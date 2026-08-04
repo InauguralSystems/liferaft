@@ -56,7 +56,25 @@
 #    seq:     <counter>           registry key source
 #    now:     <tick>              logical step counter (observation only)
 #    rng:     <prng>              the one source of randomness
-#    adv:     <adversary config>}
+#    adv:     <adversary config>
+#    viz:     null | [record...]  optional event-history sink (see cl_viz)}
+#
+# Viz event stream (issue #18, slice 1): when cluster_viz_enable has been
+# called, the harness appends one structured record per interesting event to
+# cluster.viz. The sink lives INSIDE the event loop so recording cannot fork
+# the sim's semantics: cl_viz only reads state and appends to a list — it
+# draws nothing from the PRNG, spawns no task, and never yields. A run with
+# the sink enabled is byte-identical to a run without it (the pure-reader
+# oracle in test/run.sh). Record shape:
+#   {t, node, kind, role, term, detail}
+#     t      virtual time (cluster.now, the step counter)
+#     node   the node the event is about (sender for send/drop/dup)
+#     kind   recv | client_apply | election_start | election_won | stepdown |
+#            vote | append | commit | apply | send | drop | dup |
+#            crash | restart
+#     role   the node's role AFTER the event
+#     term   the node's current_term AFTER the event
+#     detail kind-specific "k=v k=v" string (payload identifiers where cheap)
 
 g_cluster is null
 
@@ -86,7 +104,7 @@ define cluster_new(num_nodes, rng, apply_period is 0, adv is null) as:
     cluster is {"ids": ids, "rafts": rafts, "states": states, "applied": applied,
                 "tids": {}, "pending": {}, "wire": {}, "seq": 0,
                 "now": 0, "rng": rng, "adv": adv,
-                "apply_period": apply_period, "cmd_counter": 0}
+                "apply_period": apply_period, "cmd_counter": 0, "viz": null}
     g_cluster is cluster
     for id in ids:
         cluster.pending[id] is {}
@@ -102,6 +120,25 @@ define cluster_end(cluster) as:
         for k in keys of pend:
             task_kill of (pend[k])
         cluster.pending[id] is {}
+
+# Turn the viz event-history sink on. Call right after cluster_new — nothing
+# delivers until the first cluster_step, so enabling here misses no events.
+# The harness HOLDS the history (cluster.viz) so an in-process run() front-end
+# reads it directly; the CLI --viz-events flag prints it after the run.
+define cluster_viz_enable(cluster) as:
+    cluster.viz is []
+
+# Append one viz record. Pure reader: reads state, appends to a list — no PRNG
+# draw, no task op, no yield, so recording cannot perturb the sim. Call sites
+# guard on cluster.viz != null so a disabled run never even builds the detail
+# string; the check here is defense in depth.
+define cl_viz(cluster, node, kind, detail) as:
+    if cluster.viz == null:
+        return null
+    local r is cluster.rafts[node]
+    append of [cluster.viz, {"t": cluster.now, "node": node, "kind": kind,
+                             "role": r.role, "term": r.current_term,
+                             "detail": detail}]
 
 # A node's task body: block on the mailbox, feed each event to the Raft state
 # machine. Runs until task_kill (cl_crash / cluster_end). The id arg is
@@ -153,7 +190,39 @@ define cl_persist(cluster, id, persist) as:
 # Deliver one event to node `to` and route any messages the node emits.
 define cl_deliver(cluster, to, ev) as:
     raft is cluster.rafts[to]
+    # Pre-event snapshot for the viz sink's transition detection (cheap reads;
+    # unconditional so the code path is identical with the sink on or off).
+    local pre_role is raft.role
+    local pre_term is raft.current_term
+    local pre_commit is raft.committed_length
+    local pre_loglen is len of raft.log
     updates is handle_event of [raft, ev]
+    if cluster.viz != null:
+        # Stimulus first, then the transitions it caused, then log/commit
+        # effects. `updates` already carries everything — the sink records
+        # from what flows, it adds no state transitions of its own.
+        if ev.kind == "message":
+            local rk is ev.rpc.kind
+            cl_viz of [cluster, to, "recv", f"from={ev.from} rpc={rk}"]
+            # A stale-term request_vote is rejected with NO response message
+            # (handle_event's Raft 5.1 branch), so there is no vote to record.
+            if rk == "request_vote" and (len of updates.outgoing) > 0:
+                local res0 is updates.outgoing[0]
+                local granted is res0.rpc.vote_granted
+                cl_viz of [cluster, to, "vote", f"for={ev.from} granted={granted}"]
+        elif ev.kind == "apply":
+            cl_viz of [cluster, to, "client_apply", f"cmd={ev.cmd}"]
+        if raft.role == "candidate" and raft.current_term > pre_term:
+            cl_viz of [cluster, to, "election_start", f"prev_term={pre_term}"]
+        if raft.role == "leader" and pre_role != "leader":
+            local votes is vote_count of [raft, raft.id]
+            cl_viz of [cluster, to, "election_won", f"votes={votes}"]
+        if pre_role == "leader" and raft.role != "leader":
+            cl_viz of [cluster, to, "stepdown", f"prev_term={pre_term}"]
+        if (len of raft.log) > pre_loglen:
+            cl_viz of [cluster, to, "append", f"loglen={len of raft.log}"]
+        if raft.committed_length > pre_commit:
+            cl_viz of [cluster, to, "commit", f"committed={raft.committed_length}"]
     if updates.persist != null:
         cl_persist of [cluster, to, updates.persist]
     # Record the applied command stream for this node (committed entries that
@@ -162,6 +231,8 @@ define cl_deliver(cluster, to, ev) as:
     for res in updates.apply:
         if res.cmd != null:
             append of [cluster.applied[to], res.cmd]
+            if cluster.viz != null:
+                cl_viz of [cluster, to, "apply", f"cmd={res.cmd}"]
     for msg in updates.outgoing:
         cl_schedule_msg of [cluster, msg]
 
@@ -172,12 +243,23 @@ define cl_deliver(cluster, to, ev) as:
 define cl_schedule_msg(cluster, msg) as:
     adv is cluster.adv
     rng is cluster.rng
+    # Viz records go AFTER each adversary draw so recording sits outside the
+    # PRNG consumption sequence entirely (sink = pure reader).
     if adv_drop of [adv, rng]:
+        if cluster.viz != null:
+            local rkd is msg.rpc.kind
+            cl_viz of [cluster, msg.from, "drop", f"to={msg.to} rpc={rkd}"]
         return    # message lost on the wire; sender retries via heartbeat
     lat is adv_latency of [adv, rng]
+    if cluster.viz != null:
+        local rks is msg.rpc.kind
+        cl_viz of [cluster, msg.from, "send", f"to={msg.to} rpc={rks} lat={lat}"]
     cl_spawn_deliverer of [cluster, msg, lat]
     if adv_dup of [adv, rng]:
         lat2 is adv_latency of [adv, rng]
+        if cluster.viz != null:
+            local rk2 is msg.rpc.kind
+            cl_viz of [cluster, msg.from, "dup", f"to={msg.to} rpc={rk2} lat={lat2}"]
         cl_spawn_deliverer of [cluster, msg, lat2]
 
 define cl_spawn_deliverer(cluster, msg, lat) as:
@@ -229,6 +311,11 @@ define cluster_step(cluster) as:
 # node never persisted (states[id] == null), it comes back empty — faithful to
 # the reference, since only Message events persist.
 define cl_crash(cluster, cid) as:
+    # Record the crash BEFORE the state machine is rebuilt, so role/term on the
+    # record are the crashed node's last live state.
+    if cluster.viz != null:
+        local dead is cluster.rafts[cid]
+        cl_viz of [cluster, cid, "crash", f"loglen={len of dead.log}"]
     state is cluster.states[cid]
     ett is 5 + (prng_int of [cluster.rng, 4])
     cfg is {"id": cid, "cluster": cluster.ids, "election_timeout_tick": ett,
@@ -251,6 +338,10 @@ define cl_crash(cluster, cid) as:
     # crash, reclaimed with the cluster; the messages themselves are lost
     # with the mailbox, exactly like the old heap's sched_drop_to.
     cluster.tids[cid] is cl_spawn_node of cid
+    # Restart record: the rebuilt machine (follower, restored term/log).
+    if cluster.viz != null:
+        local reborn is cluster.rafts[cid]
+        cl_viz of [cluster, cid, "restart", f"loglen={len of reborn.log}"]
 
 # Run one seed to completion (or to the first violation). Checks all seven
 # invariants AND applied-stream safety after every step. Returns a result dict;
