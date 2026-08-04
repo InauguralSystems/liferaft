@@ -84,6 +84,44 @@ for args in "--seed 7 --steps 150" "--seed 42 --steps 300 --adversary --quiet"; 
 done
 [ "$pure_ok" -eq 1 ] && echo "PASS: viz pure-reader oracle (recording leaves the run byte-identical)"
 
+echo "--- visualizer front-end (#18 slice 3: pure reader of the run) ---"
+# (a) Collection oracle: the visualizer's sim run must be byte-identical
+# to the headless CLI's — `--dump` prints viz_collect's records in the
+# CLI's exact VIZ line format, and both streams must match. This is what
+# makes the UI a reader of THE run, not of a run like it. (No ui lib on
+# this path, so it runs on the pinned CI binary too.)
+vfe_ok=1
+for args in "--seed 7 --steps 150" "--seed 42 --steps 300 --adversary"; do
+  # shellcheck disable=SC2086
+  cli="$("$EIGS" liferaft.eigs $args --quiet --viz-events 2>/dev/null | grep '^VIZ ')"
+  # shellcheck disable=SC2086
+  dmp="$("$EIGS" visualizer_main.eigs $args --dump 2>/dev/null)"
+  [ -n "$dmp" ] || { echo "FAIL: visualizer --dump produced nothing ($args)"; vfe_ok=0; fail=1; }
+  [ "$cli" = "$dmp" ] \
+    || { echo "FAIL: visualizer collection diverged from the CLI stream ($args)"; vfe_ok=0; fail=1; }
+done
+[ "$vfe_ok" -eq 1 ] && echo "PASS: visualizer collection byte-identical to the CLI viz stream"
+# (b) Tape accounting: the collection path stays argv-only nondet — one
+# N record (#471), exactly like the CLI (see replay.sh).
+vtape="$(mktemp)"
+EIGS_TRACE="$vtape" "$EIGS" visualizer_main.eigs --seed 7 --steps 150 --dump >/dev/null 2>&1
+vn="$(grep -c '^N ' "$vtape" 2>/dev/null || true)"
+rm -f "$vtape"
+if [ "${vn:-0}" -gt 1 ]; then
+  echo "FAIL: visualizer dump tape carries $vn N-records (argv-only expected)"
+  fail=1
+else
+  echo "PASS: visualizer tape N-records=$vn (argv only)"
+fi
+# (c) The UI itself, driven headlessly — dev-binary only until the
+# timeline widget (#842) reaches a release pin; the probe SKIPs it on
+# the v0.36.0 pin instead of failing CI.
+if "$EIGS" test/probe_timeline.eigs >/dev/null 2>&1; then
+  unit "visualizer UI (headless dispatch)" test/test_viz_ui.eigs "viz ui: all passed"
+else
+  echo "SKIP: visualizer UI (timeline widget not in this runtime's lib — dev binary only until the next release cut)"
+fi
+
 echo "--- M4 chaos sweep + minimal-reproducing-seed reporting ---"
 # Fault OFF: the correct port must survive the whole sweep clean.
 out="$("$EIGS" liferaft_sweep.eigs --seeds 40 --steps 600 2>/dev/null)"

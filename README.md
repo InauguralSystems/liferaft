@@ -43,6 +43,7 @@ nondeterminism, is a candidate EigenScript bug — logged in
 | `src/adversary.eigs` | seeded network adversary (latency/drop/dup/crash/reorder) |
 | `src/cluster.eigs` | in-memory cluster harness on the runtime's cooperative task layer (a task per node, a detached deliverer task per in-flight message, virtual-clock latency, seeded-scheduler reorder) |
 | `liferaft.eigs` | CLI runner |
+| `visualizer.eigs` + `visualizer_main.eigs` | cluster visualizer — timeline UI + seed-replay scrubber over the viz event stream (#18) |
 | `test/` | unit + determinism + replay tests |
 | `FINDINGS.md` | every runtime bug / nondeterminism / perf cliff this port exposed |
 
@@ -65,6 +66,20 @@ after the normal output — the data contract for the #18 cluster visualizer.
 The sink is a pure reader: the non-`VIZ` output is byte-identical to a run
 without the flag (gated in `test/run.sh`), and an in-process front-end reads
 the same history off `cluster.viz`.
+
+### Cluster visualizer
+
+`eigenscript visualizer_main.eigs --seed N --steps M [--nodes K] [--adversary]`
+opens a timeline view of the run (gfx build required): one lane per node,
+role spans (follower/candidate/leader), a marker per recorded event, and a
+**seed-replay scrubber** — drag the time ruler and the per-node state panel
+re-derives role/term at that instant from the recorded history. Because the
+sim is a pure function of the seed, re-reading the record stream *is* the
+byte-for-byte replay; `--dump` prints the collected stream in the CLI's `VIZ`
+format and `test/run.sh` diffs it against `--viz-events` (so the UI can never
+show a run that differs from the headless one). The timeline widget ships in
+EigenScript's `lib/ui` on main (post-v0.36.0); on the pinned runtime the UI
+test SKIPs and only the collection oracle runs.
 
 ## Status
 
