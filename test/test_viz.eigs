@@ -1,0 +1,70 @@
+# Viz event stream (issue #18, slice 1): the engine-side event-history sink.
+# In-process API check — a future run() front-end reads cluster.viz directly,
+# so this test drives the harness the way that front-end will: cluster_new,
+# cluster_viz_enable, step, then read the history off the cluster.
+#
+# Asserts: records are non-empty and well-formed ({t, node, kind, role, term,
+# detail} with t nondecreasing inside [1, steps]), every kind in the record
+# vocabulary shows up under a crash-hot chaos profile, and the invariants stay
+# clean with the sink on. The pure-reader oracle (recording changes NOTHING
+# about the run) is the stdout byte-diff in test/run.sh.
+load_file of "src/prng.eigs"
+load_file of "src/raft.eigs"
+load_file of "src/adversary.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+
+seed is 42
+steps is 300
+# adv_chaos but crash-hot (crash_n 400 -> 30) so crash/restart records are
+# guaranteed inside a modest step budget.
+adv is {"max_latency": 3, "drop_n": 15, "dup_n": 25, "crash_n": 30, "reorder": 1}
+cluster is cluster_new of [5, prng_new of seed, 6, adv]
+cluster_viz_enable of cluster
+
+violation is null
+step is 0
+loop while step < steps and violation == null:
+    step is step + 1
+    cluster_step of cluster
+    v is check_invariants of cluster
+    if v == null:
+        v is cluster_applied_consistent of cluster
+    if v != null:
+        violation is v
+
+records is cluster.viz
+n is len of records
+
+# Well-formed: every record carries the six fields; t is nondecreasing and
+# stays inside the stepped range.
+shape_ok is 1
+last_t is 0
+for r in records:
+    for fld in ["t", "node", "kind", "role", "term", "detail"]:
+        if not (has_key of [r, fld]):
+            shape_ok is 0
+    if r.t < last_t or r.t < 1 or r.t > steps:
+        shape_ok is 0
+    last_t is r.t
+
+# Full record-kind vocabulary must appear (crash-hot chaos exercises it all).
+kinds is {}
+for r in records:
+    k is r.kind
+    kinds[k] is 1
+expected is ["recv", "send", "vote", "election_start", "election_won",
+             "append", "commit", "apply", "client_apply",
+             "drop", "dup", "crash", "restart"]
+missing is []
+for k in expected:
+    if not (has_key of [kinds, k]):
+        append of [missing, k]
+
+cluster_end of cluster
+
+print of f"records={n} shape_ok={shape_ok} missing={missing} violation={violation}"
+if n > 0 and shape_ok and (len of missing) == 0 and violation == null:
+    print of "viz: all passed"
+else:
+    print of "viz: FAILED"
