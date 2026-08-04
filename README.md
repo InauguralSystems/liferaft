@@ -78,8 +78,8 @@ sim is a pure function of the seed, re-reading the record stream *is* the
 byte-for-byte replay; `--dump` prints the collected stream in the CLI's `VIZ`
 format and `test/run.sh` diffs it against `--viz-events` (so the UI can never
 show a run that differs from the headless one). The timeline widget ships in
-EigenScript's `lib/ui` on main (post-v0.36.0); on the pinned runtime the UI
-test SKIPs and only the collection oracle runs.
+EigenScript's `lib/ui` since v0.37.0, so the pinned CI runs the full headless
+UI test alongside the collection oracle (on an older runtime it SKIPs).
 
 ## Status
 
