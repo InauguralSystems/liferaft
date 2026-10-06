@@ -87,12 +87,21 @@ define check(label, got, want) as:
         failures is failures + 1
     return 0
 
+# A condition (a comparison) checked by truthiness: a comparison is a bool
+# on EigenScript#1637's runtime and 1/0 before it; this prints the same either way.
+define check_true(label, cond) as:
+    if cond:
+        check of [label, 1, 1]
+    else:
+        check of [label, 0, 1]
+    return 0
+
 # ---- collect a real adversary run and build the UI over it ----
 res is viz_collect of [42, 300, 3, 8, 1]
 check of ["the run is clean", res.violation, null]
 check of ["the run covers every step", res.run_end, 300]
 nrec is len of res.records
-check of ["the run produced records", nrec > 100, 1]
+check_true of ["the run produced records", nrec > 100]
 
 viz_load of res
 build_ui of null
@@ -101,7 +110,7 @@ _layout of [V.root, 0, 0]
 # ---- mapping: records -> lanes/markers/spans ----
 check of ["one lane per node", len of V.tl.lanes, 3]
 check of ["every record maps to a marker", len of V.tl.markers, nrec]
-check of ["role transitions map to lane spans", (len of V.tl.spans) >= 3, 1]
+check_true of ["role transitions map to lane spans", (len of V.tl.spans) >= 3]
 mid is floor of (nrec / 2)
 check of ["the source record rides on its marker", V.tl.markers[mid].rec.kind, res.records[mid].kind]
 tb is timeline_bounds of V.tl
@@ -156,10 +165,10 @@ rx_hi is tv.rx + floor of (tv.rw * 3 / 4)
 dispatch of [V.root, {"type": "mousedown", "button": 1, "x": rx_mid, "y": tv.ry + 2}]
 check of ["a ruler press fires on_scrub", V.scrub_fires, 1]
 cur_mid is V.tl.cursor
-check of ["the press scrubbed to mid-run", (cur_mid > 100) and (cur_mid < 200), 1]
+check_true of ["the press scrubbed to mid-run", (cur_mid > 100) and (cur_mid < 200)]
 dispatch of [V.root, {"type": "mousemove", "x": rx_hi, "y": tv.ry + 2}]
 check of ["dragging the ruler keeps scrubbing", V.scrub_fires, 2]
-check of ["the drag moved the cursor forward", V.tl.cursor > cur_mid, 1]
+check_true of ["the drag moved the cursor forward", V.tl.cursor > cur_mid]
 dispatch of [V.root, {"type": "mouseup", "button": 1, "x": rx_hi, "y": tv.ry + 2}]
 
 # The state panel followed the gesture.
