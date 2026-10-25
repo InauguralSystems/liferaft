@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Language-level replay oracle: record a run to a tape with EIGS_TRACE, replay
 # it with EIGS_REPLAY, and require byte-for-byte identical stdout. Because the
-# sim touches no nondeterministic builtin, the tape must additionally carry ZERO
-# `N` records — that is the assertion that nothing nondeterministic crept in.
+# sim touches no nondeterministic builtin, only argv and the tape format v7
+# module-source records may appear as `N` records.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 EIGS="${EIGS:-./eigs}"
@@ -21,16 +21,15 @@ if ! diff -q "$first" "$second" >/dev/null; then
   exit 1
 fi
 
-# One N record is EXPECTED: upstream #471 put `args` on the tape (the CLI
-# argv is a nondeterministic input by contract), and liferaft.eigs calls
-# `args of null` exactly once. Anything beyond that single record means a
-# real nondet builtin crept into the sim. (0 tolerates a pre-#471 runtime.)
+# The CLI reads argv once (#471). Tape v7 also records loaded module source;
+# allow exactly those two source kinds, never simulation time or randomness.
 nrec="$(grep -c '^N ' "$tape" 2>/dev/null || true)"
-if [ "${nrec:-0}" -gt 1 ]; then
+nargs="$(grep -Ec '^N ([0-9]+ )?args=' "$tape" 2>/dev/null || true)"
+nsrc="$(grep -Ec '^N ([0-9]+ )?load_file_source(_chunk)?=' "$tape" 2>/dev/null || true)"
+if [ "${nargs:-0}" -ne 1 ] || [ "${nrec:-0}" -ne "$((nargs + nsrc))" ]; then
   echo "replay: FAILED — tape carries $nrec nondeterministic builtin value(s);"
-  echo "         only the single argv record (#471) is expected — a nondet"
-  echo "         builtin crept into the sim."
+  echo "         expected args=1 plus module source only; got args=$nargs source=$nsrc"
   exit 1
 fi
 
-echo "replay: byte-for-byte identical, tape N-records=$nrec (argv only; sim determinism is purely seed-derived)"
+echo "replay: byte-for-byte identical, tape N-records=$nrec (args=$nargs source=$nsrc; sim determinism is purely seed-derived)"

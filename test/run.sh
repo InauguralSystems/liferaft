@@ -101,17 +101,19 @@ for args in "--seed 7 --steps 150" "--seed 42 --steps 300 --adversary"; do
     || { echo "FAIL: visualizer collection diverged from the CLI stream ($args)"; vfe_ok=0; fail=1; }
 done
 [ "$vfe_ok" -eq 1 ] && echo "PASS: visualizer collection byte-identical to the CLI viz stream"
-# (b) Tape accounting: the collection path stays argv-only nondet — one
-# N record (#471), exactly like the CLI (see replay.sh).
+# (b) Tape accounting: one argv N record (#471), plus only the two tape v7
+# module-source kinds, exactly like the CLI (see replay.sh).
 vtape="$(mktemp)"
 EIGS_TRACE="$vtape" "$EIGS" visualizer_main.eigs --seed 7 --steps 150 --dump >/dev/null 2>&1
 vn="$(grep -c '^N ' "$vtape" 2>/dev/null || true)"
+va="$(grep -Ec '^N ([0-9]+ )?args=' "$vtape" 2>/dev/null || true)"
+vs="$(grep -Ec '^N ([0-9]+ )?load_file_source(_chunk)?=' "$vtape" 2>/dev/null || true)"
 rm -f "$vtape"
-if [ "${vn:-0}" -gt 1 ]; then
-  echo "FAIL: visualizer dump tape carries $vn N-records (argv-only expected)"
+if [ "${va:-0}" -ne 1 ] || [ "${vn:-0}" -ne "$((va + vs))" ]; then
+  echo "FAIL: visualizer dump tape carries N=$vn args=$va source=$vs (args=1 plus module source only expected)"
   fail=1
 else
-  echo "PASS: visualizer tape N-records=$vn (argv only)"
+  echo "PASS: visualizer tape N-records=$vn (args=$va source=$vs)"
 fi
 # (c) The UI itself, driven headlessly — dev-binary only until the
 # timeline widget (#842) reaches a release pin; the probe SKIPs it on
