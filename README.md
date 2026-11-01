@@ -105,7 +105,19 @@ UI test alongside the collection oracle (on an older runtime it SKIPs).
   the minimal repro and prints the runnable command. Validated both ways: the
   correct port sweeps clean (40 seeds × 600 steps), and an injected fault
   (`--fault uptodate`, a stale candidate winning — a real Raft safety bug) is
-  caught and shrunk to a verified `--seed 1 --steps 75` repro.
+  caught and shrunk to a verified minimal repro (the seed and step depend on
+  the runtime; the suite reads them from the sweep's own output).
+
+- **The oracle is plant-proven** (`test/test_invariant_plants.eigs`): each of
+  the seven invariants, and the applied-stream check, is shown firing on a
+  hand-built cluster that violates it, and staying quiet on a healthy one; the
+  injected fault must be caught by one of the seven invariants, and its repro
+  must fail a `liferaft.eigs` run. Every `liferaft.eigs` run the suite
+  compares or sweeps must also complete (exit 0, ending on its `OK seed=`
+  line); the visualizer `--dump` runs must exit 0; and the M4 sweeps must end
+  on their verdict line with their expected status (0 clean, 1 after the
+  fault-on repro line). A crash fails the suite instead of passing as "no
+  VIOLATION" or as two identical outputs.
 
 The DST is complete. Possible extensions: snapshotting, membership changes,
 larger automated sweeps in CI.
