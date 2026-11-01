@@ -131,7 +131,13 @@ for args in "--seed 7 --steps 150" "--seed 42 --steps 300 --adversary"; do
   sim "visualizer CLI stream ($args)" $args --quiet --viz-events || { vfe_ok=0; fail=1; continue; }
   cli="$(printf '%s\n' "$sim_out" | grep '^VIZ ')"
   # shellcheck disable=SC2086
-  dmp="$("$EIGS" visualizer_main.eigs $args --dump 2>/dev/null)"
+  # The dump run must complete too (exit 0): it exits 1 on a VIOLATION, and a
+  # crash after the records are printed would otherwise compare equal.
+  dmp="$("$EIGS" visualizer_main.eigs $args --dump 2>"$sim_err")"; dmp_rc=$?
+  if [ "$dmp_rc" -ne 0 ]; then
+    echo "FAIL: visualizer --dump did not complete ($args): exit=$dmp_rc"
+    tail -n 3 "$sim_err" | sed 's/^/    stderr: /'; vfe_ok=0; fail=1
+  fi
   [ -n "$dmp" ] || { echo "FAIL: visualizer --dump produced nothing ($args)"; vfe_ok=0; fail=1; }
   [ "$cli" = "$dmp" ] \
     || { echo "FAIL: visualizer collection diverged from the CLI stream ($args)"; vfe_ok=0; fail=1; }
@@ -140,12 +146,16 @@ done
 # (b) Tape accounting: one argv N record (#471), plus only the two tape v7
 # module-source kinds, exactly like the CLI (see replay.sh).
 vtape="$(mktemp)"
-EIGS_TRACE="$vtape" "$EIGS" visualizer_main.eigs --seed 7 --steps 150 --dump >/dev/null 2>&1
+EIGS_TRACE="$vtape" "$EIGS" visualizer_main.eigs --seed 7 --steps 150 --dump >/dev/null 2>"$sim_err"; vt_rc=$?
 vn="$(grep -c '^N ' "$vtape" 2>/dev/null || true)"
 va="$(grep -Ec '^N ([0-9]+ )?args=' "$vtape" 2>/dev/null || true)"
 vs="$(grep -Ec '^N ([0-9]+ )?load_file_source(_chunk)?=' "$vtape" 2>/dev/null || true)"
 rm -f "$vtape"
-if [ "${va:-0}" -ne 1 ] || [ "${vn:-0}" -ne "$((va + vs))" ]; then
+if [ "$vt_rc" -ne 0 ]; then
+  # A recorded run that did not complete says nothing about the tape's contents.
+  echo "FAIL: visualizer tape run did not complete: exit=$vt_rc"
+  tail -n 3 "$sim_err" | sed 's/^/    stderr: /'; fail=1
+elif [ "${va:-0}" -ne 1 ] || [ "${vn:-0}" -ne "$((va + vs))" ]; then
   echo "FAIL: visualizer dump tape carries N=$vn args=$va source=$vs (args=1 plus module source only expected)"
   fail=1
 else
@@ -161,17 +171,25 @@ else
 fi
 
 echo "--- M4 chaos sweep + minimal-reproducing-seed reporting ---"
-# Fault OFF: the correct port must survive the whole sweep clean.
-out="$("$EIGS" liferaft_sweep.eigs --seeds 40 --steps 600 2>/dev/null)"
-if printf '%s\n' "$out" | grep -q '^SWEEP CLEAN'; then
+# Fault OFF: the correct port must survive the whole sweep clean, and the
+# sweep must complete: exit 0, with SWEEP CLEAN as its last line.
+out="$("$EIGS" liferaft_sweep.eigs --seeds 40 --steps 600 2>"$sim_err")"; m4_rc=$?
+if [ "$m4_rc" -eq 0 ] && [[ "$(printf '%s\n' "$out" | tail -n 1)" == "SWEEP CLEAN: "* ]]; then
   echo "PASS: M4 sweep clean ($(printf '%s\n' "$out" | grep '^SWEEP CLEAN' | sed 's/SWEEP CLEAN: //'))"
 else
-  echo "FAIL: M4 clean sweep"; printf '%s\n' "$out" | tail -3; fail=1
+  echo "FAIL: M4 clean sweep (exit=$m4_rc)"; printf '%s\n' "$out" | tail -3
+  tail -n 3 "$sim_err" | sed 's/^/    stderr: /'; fail=1
 fi
 # Fault ON: the oracle + minimizer must catch a real violation AND verify the
 # minimal repro. A sweep that can never fail would prove nothing about detection.
-out="$("$EIGS" liferaft_sweep.eigs --seeds 40 --steps 600 --fault uptodate 2>/dev/null)"
-if printf '%s\n' "$out" | grep -q '^VIOLATION FOUND' && printf '%s\n' "$out" | grep -q 'verified=true'; then
+# The sweep exits 1 straight after printing the repro command, so a completed
+# fault-on sweep is exit 1 with that command as its last line; a crash anywhere
+# earlier ends on some other line.
+out="$("$EIGS" liferaft_sweep.eigs --seeds 40 --steps 600 --fault uptodate 2>"$sim_err")"; m4_rc=$?
+if [ "$m4_rc" -ne 1 ] || [[ "$(printf '%s\n' "$out" | tail -n 1)" != "  eigenscript liferaft.eigs "* ]]; then
+  echo "FAIL: M4 fault-on sweep did not complete (exit=$m4_rc, expected 1 after its repro line)"; printf '%s\n' "$out" | tail -4
+  tail -n 3 "$sim_err" | sed 's/^/    stderr: /'; fail=1
+elif printf '%s\n' "$out" | grep -q '^VIOLATION FOUND' && printf '%s\n' "$out" | grep -q 'verified=true'; then
   echo "PASS: M4 fault injection caught + minimal repro verified ($(printf '%s\n' "$out" | grep '^VIOLATION FOUND' | sed 's/VIOLATION FOUND //'))"
 else
   echo "FAIL: M4 fault injection not caught/verified"; printf '%s\n' "$out" | tail -4; fail=1
