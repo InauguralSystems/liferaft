@@ -1,0 +1,146 @@
+# Plant-proof for the safety oracle (hq#58 / LR-ORACLE-1).
+#
+# Every other test calls check_invariants on a CORRECT simulation and asserts
+# it returned null — which a check_invariants that always returns null passes
+# too. This file proves the oracle can go red: for each of the seven
+# invariants (and the applied-stream check) it hand-builds a minimal 3-node
+# cluster that violates that invariant, and asserts
+#   - the invariant's own function returns a message naming it,
+#   - every invariant check_invariants runs BEFORE it returns null on the
+#     plant (so the plant isolates its target in check_invariants' order),
+#   - check_invariants itself returns that invariant's message.
+# A clean twin (a healthy cluster that exercises every invariant's comparison)
+# must make all seven return null, so an invariant that fires on everything is
+# caught as well as one that never fires.
+#
+# Disabling any one invariant, or check_invariants as a whole, turns this red.
+load_file of "src/raft.eigs"
+load_file of "src/invariants.eigs"
+load_file of "src/cluster.eigs"
+
+# Invariant names in check_invariants' evaluation order (src/invariants.eigs).
+INV_NAMES is ["leader_invariant", "log_invariant", "log_prefix_invariant", "election_safety_invariant", "quorum_log_invariant", "more_up_to_date_invariant", "leader_completeness_invariant"]
+
+define run_inv(name, cluster) as:
+    if name == "leader_invariant":
+        return leader_invariant of cluster
+    if name == "log_invariant":
+        return log_invariant of cluster
+    if name == "log_prefix_invariant":
+        return log_prefix_invariant of cluster
+    if name == "election_safety_invariant":
+        return election_safety_invariant of cluster
+    if name == "quorum_log_invariant":
+        return quorum_log_invariant of cluster
+    if name == "more_up_to_date_invariant":
+        return more_up_to_date_invariant of cluster
+    if name == "leader_completeness_invariant":
+        return leader_completeness_invariant of cluster
+    return f"unknown invariant {name}"
+
+# Entry and node builders. Only the fields the invariants read are set.
+define ent(term, cmd) as:
+    return {"term": term, "cmd": cmd}
+
+define node(role, term, log, commit) as:
+    return {"role": role, "current_term": term, "log": log, "committed_length": commit}
+
+define mk3(ra, rb, rc) as:
+    return {"ids": ["a", "b", "c"], "rafts": {"a": ra, "b": rb, "c": rc}}
+
+# A violation message (null when the check held) that begins with `prefix`.
+define msg_starts(s, prefix) as:
+    if s == null:
+        return 0
+    return starts_with of [s, prefix]
+
+failures is 0
+failed is []
+
+define fail_msg(msg) as:
+    failures is failures + 1
+    append of [failed, msg]
+    print of f"FAIL: {msg}"
+
+# One plant: `cluster` must violate `target`, every earlier invariant must hold,
+# and check_invariants must report `target`.
+define expect_plant(target, cluster) as:
+    want is f"{target}: "
+    got is run_inv of [target, cluster]
+    if not (msg_starts of [got, want]):
+        fail_msg of f"plant {target}: {target} returned '{got}', expected a '{want}...' violation"
+    i is 0
+    loop while INV_NAMES[i] != target:
+        earlier is run_inv of [INV_NAMES[i], cluster]
+        if earlier != null:
+            fail_msg of f"plant {target}: earlier {INV_NAMES[i]} also fired ('{earlier}'), plant does not isolate its target"
+        i is i + 1
+    v is check_invariants of cluster
+    if not (msg_starts of [v, want]):
+        fail_msg of f"plant {target}: check_invariants returned '{v}', expected a '{want}...' violation"
+    else:
+        print of f"ok: {v}"
+
+# ---- clean twin: every invariant holds, and each one's comparison runs ----
+# a leads term 3 with entries from terms 1 and 2; b matches and has committed
+# both; c lags by one entry with one committed. leader_completeness compares
+# b's committed tail (term 2) against the term-3 leader's log.
+x1 is ent of [1, "x"]
+y2 is ent of [2, "y"]
+clean is mk3 of [node of ["leader", 3, [x1, y2], 2], node of ["follower", 3, [x1, y2], 2], node of ["follower", 3, [x1], 1]]
+for name in INV_NAMES:
+    r is run_inv of [name, clean]
+    if r != null:
+        fail_msg of f"clean twin: {name} fired on a healthy cluster: {r}"
+cv is check_invariants of clean
+if cv != null:
+    fail_msg of f"clean twin: check_invariants returned '{cv}'"
+else:
+    print of "ok: clean twin holds all seven"
+
+# ---- the seven plants ----
+# Two leaders in term 2.
+expect_plant of ["leader_invariant", mk3 of [node of ["leader", 2, [], 0], node of ["leader", 2, [], 0], node of ["follower", 2, [], 0]]]
+
+# a and b each committed a different entry at index 0.
+expect_plant of ["log_invariant", mk3 of [node of ["follower", 1, [ent of [1, "x"]], 1], node of ["follower", 1, [ent of [1, "y"]], 1], node of ["follower", 1, [], 0]]]
+
+# Same (index 1, term 2) on a and b, but their entries at index 0 differ.
+expect_plant of ["log_prefix_invariant", mk3 of [node of ["follower", 2, [ent of [1, "x"], ent of [2, "z"]], 0], node of ["follower", 2, [ent of [1, "y"], ent of [2, "z"]], 0], node of ["follower", 2, [], 0]]]
+
+# Leader a (term 2) has no term-2 entry; follower b has one at index 1.
+expect_plant of ["election_safety_invariant", mk3 of [node of ["leader", 2, [ent of [1, "x"]], 0], node of ["follower", 2, [ent of [1, "x"], ent of [2, "y"]], 0], node of ["follower", 2, [], 0]]]
+
+# a committed an entry no other node holds.
+expect_plant of ["quorum_log_invariant", mk3 of [node of ["follower", 1, [ent of [1, "x"]], 1], node of ["follower", 1, [], 0], node of ["follower", 1, [], 0]]]
+
+# a's log (last term 2) is more up to date than b's, yet lacks b's committed
+# entry; c holds it, so the quorum check passes.
+expect_plant of ["more_up_to_date_invariant", mk3 of [node of ["follower", 2, [ent of [2, "z"]], 0], node of ["follower", 2, [ent of [1, "x"]], 1], node of ["follower", 2, [ent of [1, "x"]], 0]]]
+
+# a committed a term-1 entry (b holds it too, so quorum passes); c leads
+# term 2 with an empty log — the shape the `--fault uptodate` bug produces.
+expect_plant of ["leader_completeness_invariant", mk3 of [node of ["follower", 1, [ent of [1, "x"]], 1], node of ["follower", 1, [ent of [1, "x"]], 0], node of ["leader", 2, [], 0]]]
+
+# ---- applied-stream safety (cluster_applied_consistent) ----
+ok_applied is {"ids": ["a", "b", "c"], "applied": {"a": ["x", "y"], "b": ["x"], "c": []}}
+av is cluster_applied_consistent of ok_applied
+if av != null:
+    fail_msg of f"applied clean twin: cluster_applied_consistent returned '{av}'"
+else:
+    print of "ok: applied clean twin holds"
+bad_applied is {"ids": ["a", "b", "c"], "applied": {"a": ["x", "y"], "b": ["x", "w"], "c": []}}
+bv is cluster_applied_consistent of bad_applied
+if not (msg_starts of [bv, "applied conflict between a and b at 1"]):
+    fail_msg of f"applied plant: cluster_applied_consistent returned '{bv}', expected an applied conflict between a and b at 1"
+else:
+    print of f"ok: {bv}"
+
+if failures == 0:
+    print of "invariant plants: all passed"
+else:
+    # Recap last, so a runner that shows only the output's tail shows these.
+    for m in failed:
+        print of f"FAILED: {m}"
+    print of f"invariant plants: {failures} FAILED"
+    exit of 1

@@ -107,6 +107,15 @@ UI test alongside the collection oracle (on an older runtime it SKIPs).
   (`--fault uptodate`, a stale candidate winning — a real Raft safety bug) is
   caught and shrunk to a verified `--seed 1 --steps 75` repro.
 
+- **The oracle is plant-proven** (`test/test_invariant_plants.eigs`): each of
+  the seven invariants, and the applied-stream check, is shown firing on a
+  hand-built cluster that violates it, and staying quiet on a healthy one; the
+  injected fault must be caught by one of the seven invariants, and its repro
+  must fail a `liferaft.eigs` run. Every simulation run the suite compares or
+  sweeps must also complete (exit 0, ending on its `OK seed=` line), so a crash
+  fails the suite instead of passing as "no VIOLATION" or as two identical
+  outputs.
+
 The DST is complete. Possible extensions: snapshotting, membership changes,
 larger automated sweeps in CI.
 

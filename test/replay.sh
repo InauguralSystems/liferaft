@@ -9,11 +9,25 @@ EIGS="${EIGS:-./eigs}"
 SEED="${1:-12345}"
 STEPS="${2:-150}"
 
-tape="$(mktemp)"; first="$(mktemp)"; second="$(mktemp)"
-trap 'rm -f "$tape" "$first" "$second"' EXIT
+tape="$(mktemp)"; first="$(mktemp)"; second="$(mktemp)"; err="$(mktemp)"
+trap 'rm -f "$tape" "$first" "$second" "$err"' EXIT
 
-EIGS_TRACE="$tape"  "$EIGS" liferaft.eigs --seed "$SEED" --steps "$STEPS" 2>/dev/null > "$first"
-EIGS_REPLAY="$tape" "$EIGS" liferaft.eigs --seed "$SEED" --steps "$STEPS" 2>/dev/null > "$second"
+# Each leg must COMPLETE: exit 0 and end on the run's `OK seed=<SEED> ` line.
+# Two legs that crash identically produce identical stdout, so the diff below
+# alone would pass a broken run (hq#58: LR-DET-1).
+leg_ok () { # name rc stdout-file
+  local last; last="$(tail -n 1 "$3")"
+  if [ "$2" -ne 0 ] || [[ "$last" != "OK seed=$SEED "* ]]; then
+    echo "replay: FAILED — $1 leg did not complete (exit=$2, last line: ${last:-<none>})"
+    tail -n 3 "$err" | sed 's/^/    stderr: /'
+    exit 1
+  fi
+}
+
+EIGS_TRACE="$tape"  "$EIGS" liferaft.eigs --seed "$SEED" --steps "$STEPS" 2>"$err" > "$first"
+leg_ok record "$?" "$first"
+EIGS_REPLAY="$tape" "$EIGS" liferaft.eigs --seed "$SEED" --steps "$STEPS" 2>"$err" > "$second"
+leg_ok replay "$?" "$second"
 
 if ! diff -q "$first" "$second" >/dev/null; then
   echo "replay: FAILED — record vs replay output differs (seed=$SEED)"
