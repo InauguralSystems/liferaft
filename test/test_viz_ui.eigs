@@ -1,13 +1,13 @@
 # Visualizer UI driven headlessly (issue #18, slice 3) — the upstream
 # tests/test_ui.eigs pattern: gfx stubbed, lib/ui.eigs loaded for real,
-# real event dicts through dispatch. DEV-BINARY ONLY: needs a runtime
+# real event dicts through ui_dispatch. DEV-BINARY ONLY: needs a runtime
 # whose lib carries the timeline widget (EigenScript main post-v0.36.0);
 # test/run.sh probes for it and SKIPs this file on the v0.36.0 pin.
 #
 # What is bound here:
 #   - the mapping (viz_build_timeline): every record -> a marker carrying
 #     its source record; role transitions -> lane spans; bounds = the run
-#   - the scrubber seam: a ruler press + drag through dispatch fires
+#   - the scrubber seam: a ruler press + drag through ui_dispatch fires
 #     on_scrub and re-derives the state panel; a PROGRAMMATIC
 #     timeline_set_cursor must NOT fire it (the #842 gesture-only
 #     contract — the replay can never feed back into the scrub handler)
@@ -151,7 +151,7 @@ for id in res.ids:
         terms_ok is 0
 check of ["end-state terms are sane", terms_ok, 1]
 
-# ---- the scrubber: ruler press + drag through dispatch ----
+# ---- the scrubber: ruler press + drag through ui_dispatch ----
 # The panel seeds the cursor PROGRAMMATICALLY at run_end in build_ui —
 # that must not have fired on_scrub.
 check of ["programmatic cursor seeding fired no scrub", V.scrub_fires, 0]
@@ -162,14 +162,14 @@ V.tl._ay is 30
 tv is timeline_view of V.tl
 rx_mid is tv.rx + floor of (tv.rw / 2)
 rx_hi is tv.rx + floor of (tv.rw * 3 / 4)
-dispatch of [V.root, {"type": "mousedown", "button": 1, "x": rx_mid, "y": tv.ry + 2}]
+ui_dispatch of [V.root, {"type": "mousedown", "button": 1, "x": rx_mid, "y": tv.ry + 2}]
 check of ["a ruler press fires on_scrub", V.scrub_fires, 1]
 cur_mid is V.tl.cursor
 check_true of ["the press scrubbed to mid-run", (cur_mid > 100) and (cur_mid < 200)]
-dispatch of [V.root, {"type": "mousemove", "x": rx_hi, "y": tv.ry + 2}]
+ui_dispatch of [V.root, {"type": "mousemove", "x": rx_hi, "y": tv.ry + 2}]
 check of ["dragging the ruler keeps scrubbing", V.scrub_fires, 2]
 check_true of ["the drag moved the cursor forward", V.tl.cursor > cur_mid]
-dispatch of [V.root, {"type": "mouseup", "button": 1, "x": rx_hi, "y": tv.ry + 2}]
+ui_dispatch of [V.root, {"type": "mouseup", "button": 1, "x": rx_hi, "y": tv.ry + 2}]
 
 # The state panel followed the gesture.
 lb1 is V.node_lbs["1"]
